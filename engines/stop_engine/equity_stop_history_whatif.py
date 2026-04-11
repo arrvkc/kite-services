@@ -57,7 +57,35 @@ class EquityWhatIfConfig:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Equity stop history what-if simulator")
+    examples = """
+Examples:
+
+  Use entry-date close as entry price:
+    PYTHONPATH=.:services python engines/stop_engine/equity_stop_history_whatif.py ACC --exchange NSE --entry-date 2025-12-26
+
+  Use entry-date close and quantity 900:
+    PYTHONPATH=.:services python engines/stop_engine/equity_stop_history_whatif.py ACC --exchange NSE --entry-date 2025-12-26 --quantity 900
+
+  Override entry price explicitly:
+    PYTHONPATH=.:services python engines/stop_engine/equity_stop_history_whatif.py ACC --exchange NSE --entry-date 2025-12-26 --entry-price 2453.86 --quantity 900
+
+  Stop history only until a chosen end date:
+    PYTHONPATH=.:services python engines/stop_engine/equity_stop_history_whatif.py ACC --exchange NSE --entry-date 2025-12-26 --quantity 900 --end-date 2026-04-10
+
+  Show summary above the output:
+    PYTHONPATH=.:services python engines/stop_engine/equity_stop_history_whatif.py ACC --exchange NSE --entry-date 2025-12-26 --quantity 900 --show-summary
+
+  CSV output:
+    PYTHONPATH=.:services python engines/stop_engine/equity_stop_history_whatif.py ACC --exchange NSE --entry-date 2025-12-26 --quantity 900 --format csv
+
+  BSE example:
+    PYTHONPATH=.:services python engines/stop_engine/equity_stop_history_whatif.py HINDALCO --exchange BSE --entry-date 2025-12-26 --quantity 7000
+"""
+    parser = argparse.ArgumentParser(
+        description="Equity stop history what-if simulator",
+        epilog=examples,
+        formatter_class=argparse.RawTextHelpFormatter,
+    )
     parser.add_argument("symbol", help="Equity symbol, e.g. ACC")
     parser.add_argument("--exchange", default="NSE", choices=["NSE", "BSE"], help="Exchange for candle lookup")
     parser.add_argument("--entry-date", required=True, help="Entry date in YYYY-MM-DD")

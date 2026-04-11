@@ -1,4 +1,21 @@
 #!/usr/bin/env python3
+"""
+Reconstruct daily stop history from current lifecycle start date to today.
+
+Run like:
+PYTHONPATH=.:services python engines/stop_engine/stop_history_dry_run.py OMK569 next HDFCBANK
+
+What it does:
+- selects the current open position using real broker positions
+- finds the current open lifecycle start from raw_broker_trades
+- fetches completed daily candles from Kite
+- recomputes the EOD stop day-by-day from lifecycle start to today
+- prints one row per day
+
+This is a reconstructed theoretical stop history.
+It is not persisted historical accepted stop state.
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -11,16 +28,19 @@ import psycopg
 from kiteconnect import KiteConnect
 
 from kite_credentials_service import get_kite_credentials
+from kite_market_data_service import get_all_futures_positions
 from engines.stop_engine.stop_computation_engine import (
     StopComputationConfig,
     compute_deterministic_stop_eod,
     prepare_limit_order_from_trigger,
 )
 
+VALID_CONTRACT_TYPES = {"near", "next", "far"}
+
 
 @dataclass(frozen=True)
-class EquityHistoryConfig:
-    candle_days: int = 730
+class StopHistoryConfig:
+    candle_days: int = 365
     candle_interval: str = "day"
     dsn: str = "postgresql://postgres:postgres@localhost:5432/trades"
     broker: str = "zerodha"
@@ -34,55 +54,63 @@ def get_kite_client(user_id: str) -> KiteConnect:
     return kite
 
 
-def get_all_equity_positions(kite: KiteConnect) -> List[Dict]:
-    positions = kite.positions()
-    net_positions = positions.get("net", []) or []
-    out: List[Dict] = []
+def get_nfo_futures_instruments(kite: KiteConnect) -> List[Dict]:
+    return [i for i in kite.instruments("NFO") if i.get("instrument_type") == "FUT"]
 
-    for p in net_positions:
-        exchange = str(p.get("exchange") or "").strip().upper()
-        quantity = int(p.get("quantity") or 0)
-        tradingsymbol = str(p.get("tradingsymbol") or "").strip()
-        if quantity <= 0 or not tradingsymbol:
+
+def get_market_expiry_ladder(kite: KiteConnect, symbol: Optional[str] = None) -> Dict[str, List[Dict]]:
+    today = datetime.now().date()
+    instruments = get_nfo_futures_instruments(kite)
+    grouped: Dict[str, List[Dict]] = {}
+
+    for inst in instruments:
+        expiry = inst.get("expiry")
+        underlying = inst.get("name")
+        if not expiry or not underlying:
             continue
-        if exchange not in {"NSE", "BSE"}:
+        if expiry < today:
             continue
-        out.append(p)
-
-    seen = {
-        (str(p.get("exchange") or "").strip().upper(), str(p.get("tradingsymbol") or "").strip())
-        for p in out
-    }
-
-    try:
-        holdings = kite.holdings() or []
-    except Exception as exc:
-        raise RuntimeError(f"Failed to fetch holdings: {exc}")
-
-    for holding in holdings:
-        exchange = str(holding.get("exchange") or "NSE").strip().upper()
-        tradingsymbol = str(holding.get("tradingsymbol") or "").strip()
-
-        free_qty = int(holding.get("quantity") or 0)
-        t1_qty = int(holding.get("t1_quantity") or 0)
-        collateral_qty = int(holding.get("collateral_quantity") or 0)
-
-        effective_quantity = free_qty + t1_qty + collateral_qty
-
-        if effective_quantity <= 0 or not tradingsymbol:
+        if symbol and underlying.upper() != symbol.upper():
             continue
+        grouped.setdefault(underlying, []).append(inst)
 
-        key = (exchange, tradingsymbol)
-        if key in seen:
+    for underlying in grouped:
+        grouped[underlying] = sorted(grouped[underlying], key=lambda x: x["expiry"])
+
+    return grouped
+
+
+def find_positions(user_id: str, contract_type: str, symbol: Optional[str] = None) -> List[Dict]:
+    if contract_type not in VALID_CONTRACT_TYPES:
+        raise ValueError("contract_type must be one of: near, next, far")
+
+    kite = get_kite_client(user_id)
+    positions = get_all_futures_positions(user_id=user_id, exclude_zero_qty=True)
+
+    if symbol:
+        symbol_upper = symbol.upper()
+        positions = [p for p in positions if p["underlying"].upper() == symbol_upper]
+
+    if not positions:
+        return []
+
+    ladder_map = get_market_expiry_ladder(kite, symbol=symbol)
+    idx = {"near": 0, "next": 1, "far": 2}[contract_type]
+
+    selected_positions: List[Dict] = []
+    positions_by_underlying: Dict[str, List[Dict]] = {}
+    for p in positions:
+        positions_by_underlying.setdefault(p["underlying"], []).append(p)
+
+    for underlying, held_positions in positions_by_underlying.items():
+        ladder = ladder_map.get(underlying, [])
+        if idx >= len(ladder):
             continue
+        selected_contract = ladder[idx]["tradingsymbol"]
+        matched = [p for p in held_positions if p["tradingsymbol"] == selected_contract]
+        selected_positions.extend(matched)
 
-        h = dict(holding)
-        h["quantity"] = effective_quantity
-        h["average_price"] = float(h.get("average_price") or 0.0)
-        h["product"] = "HOLDING"
-        out.append(h)
-
-    return out
+    return selected_positions
 
 
 def candles_to_dicts(raw_candles: List[Dict]) -> List[Dict]:
@@ -104,7 +132,7 @@ def get_completed_daily_candles(
     kite: KiteConnect,
     instrument_token: int,
     start_date: date,
-    config: EquityHistoryConfig,
+    config: StopHistoryConfig,
 ) -> List[Dict]:
     from_dt = datetime.combine(start_date, datetime.min.time()) - timedelta(days=60)
     to_dt = datetime.now()
@@ -114,76 +142,26 @@ def get_completed_daily_candles(
         to_date=to_dt,
         interval=config.candle_interval,
         continuous=False,
-        oi=False,
+        oi=True,
     )
     return candles_to_dicts(raw)
 
 
-def build_db_instrument_key(exchange: str, tradingsymbol: str) -> str:
-    ex = (exchange or "NSE").strip().upper()
-    if ex not in {"NSE", "BSE"}:
-        ex = "NSE"
-    return f"{ex}|EQ|{tradingsymbol}"
+def map_position_exchange_to_db_exchange(exchange: str) -> str:
+    ex = (exchange or "").strip().upper()
+    if ex in {"", "NFO"}:
+        return "NSE"
+    if ex == "BFO":
+        return "BSE"
+    return ex
 
 
-def resolve_equity_instrument_key(
-    dsn: str,
-    broker: str,
-    account_id: str,
-    preferred_instrument_key: str,
-    tradingsymbol: str,
-) -> str:
-    """
-    Resolve the raw trade instrument_key for equity history reconstruction.
-
-    Strategy:
-    1. Try exact match first.
-    2. If not found, fall back to unique *|EQ|<SYMBOL>.
-    3. If multiple EQ matches exist, fail explicitly.
-    """
-
-    exact_sql = """
-        SELECT 1
-        FROM raw_broker_trades
-        WHERE broker = %s
-          AND account_id = %s
-          AND instrument_key = %s
-        LIMIT 1
-    """
-
-    fallback_sql = """
-        SELECT instrument_key, COUNT(*) AS row_count
-        FROM raw_broker_trades
-        WHERE broker = %s
-          AND account_id = %s
-          AND instrument_key LIKE %s
-        GROUP BY instrument_key
-        ORDER BY instrument_key
-    """
-
-    with psycopg.connect(dsn) as conn:
-        with conn.cursor() as cur:
-            cur.execute(exact_sql, (broker, account_id, preferred_instrument_key))
-            exact = cur.fetchone()
-            if exact:
-                return preferred_instrument_key
-
-            cur.execute(fallback_sql, (broker, account_id, f"%|EQ|{tradingsymbol}"))
-            matches = cur.fetchall()
-
-    if not matches:
-        raise ValueError(
-            f"No raw equity trades found for preferred key={preferred_instrument_key} "
-            f"or symbol fallback=*|EQ|{tradingsymbol}"
-        )
-
-    if len(matches) > 1:
-        candidates = ", ".join(row[0] for row in matches)
-        raise ValueError(
-            f"Multiple equity instrument_key matches found for symbol={tradingsymbol}: {candidates}"
-        )
-
-    return str(matches[0][0])
+def build_db_instrument_key_from_position(position: Dict) -> str:
+    exchange = map_position_exchange_to_db_exchange(str(position.get("exchange") or ""))
+    tradingsymbol = str(position.get("tradingsymbol") or "").strip()
+    if not tradingsymbol:
+        raise ValueError("Missing tradingsymbol in position")
+    return f"{exchange}|FO|{tradingsymbol}"
 
 
 def fetch_current_lifecycle_start(
@@ -201,6 +179,7 @@ def fetch_current_lifecycle_start(
         ORDER BY execution_timestamp ASC, trade_id ASC, order_id ASC
     """
 
+    rows: List[Tuple[datetime, Decimal]] = []
     with psycopg.connect(dsn) as conn:
         with conn.cursor() as cur:
             cur.execute(sql, (broker, account_id, instrument_key))
@@ -215,11 +194,13 @@ def fetch_current_lifecycle_start(
     for execution_timestamp, signed_quantity, trade_id, order_id in rows:
         prev_net = net
         net += Decimal(str(signed_quantity))
+
         if prev_net == 0 and net != 0:
             lifecycle_start = execution_timestamp
 
     if net == 0:
         raise ValueError(f"Instrument {instrument_key} is not currently open in raw trade history")
+
     if lifecycle_start is None:
         raise ValueError(f"Could not determine lifecycle start for {instrument_key}")
 
@@ -243,8 +224,9 @@ def print_table(headers: List[str], rows: List[List[str]]) -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Reconstruct daily equity stop history from current lifecycle start")
-    parser.add_argument("user_id")
+    parser = argparse.ArgumentParser(description="Reconstruct daily stop history from current lifecycle start")
+    parser.add_argument("user_id", help="Zerodha user ID, e.g. OMK569")
+    parser.add_argument("contract_type", nargs="?", default="near", choices=["near", "next", "far"])
     parser.add_argument("symbol", nargs="?", default=None)
     parser.add_argument("--dsn", default="postgresql://postgres:postgres@localhost:5432/trades")
     parser.add_argument("--broker", default="zerodha")
@@ -253,43 +235,18 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    kite = get_kite_client(args.user_id)
-    positions = get_all_equity_positions(kite)
 
-    if args.symbol:
-        symbol = args.symbol.upper()
-        positions = [p for p in positions if str(p.get("tradingsymbol") or "").upper() == symbol]
+    kite = get_kite_client(args.user_id)
+    positions = find_positions(args.user_id, args.contract_type, args.symbol)
 
     if not positions:
-        print("No matching long equity positions found.")
+        print(f"No {args.contract_type}-month futures position found.")
         return 0
 
     rows_to_print: List[List[str]] = []
 
     for position in positions:
-        quantity = int(position.get("quantity") or 0)
-        if quantity <= 0:
-            continue
-
-        exchange = str(position.get("exchange") or "NSE").strip().upper()
-        tradingsymbol = str(position.get("tradingsymbol") or "").strip()
-        instrument_token = position.get("instrument_token")
-        if instrument_token is None or not tradingsymbol:
-            continue
-
-        entry_price = float(position.get("avg_price") or position.get("average_price") or 0.0)
-        if entry_price <= 0:
-            continue
-
-        preferred_instrument_key = build_db_instrument_key(exchange, tradingsymbol)
-        instrument_key = resolve_equity_instrument_key(
-            dsn=args.dsn,
-            broker=args.broker,
-            account_id=args.user_id,
-            preferred_instrument_key=preferred_instrument_key,
-            tradingsymbol=tradingsymbol,
-        )
-
+        instrument_key = build_db_instrument_key_from_position(position)
         lifecycle_start, net_qty = fetch_current_lifecycle_start(
             dsn=args.dsn,
             broker=args.broker,
@@ -297,12 +254,16 @@ def main() -> int:
             instrument_key=instrument_key,
         )
 
+        side = "LONG" if int(position["quantity"]) > 0 else "SHORT"
         tick_size = float(position.get("tick_size") or 0.05)
+        entry_price = float(position["avg_price"])
+        instrument_token = int(position["instrument_token"])
+
         candles = get_completed_daily_candles(
             kite=kite,
-            instrument_token=int(instrument_token),
+            instrument_token=instrument_token,
             start_date=lifecycle_start.date(),
-            config=EquityHistoryConfig(dsn=args.dsn, broker=args.broker),
+            config=StopHistoryConfig(dsn=args.dsn, broker=args.broker),
         )
 
         previous_trigger_price: Optional[float] = None
@@ -314,17 +275,17 @@ def main() -> int:
             try:
                 result = compute_deterministic_stop_eod(
                     candles=partial,
-                    side="LONG",
+                    side=side,
                     tick_size=tick_size,
                     entry_price=entry_price,
                     previous_trigger_price=previous_trigger_price,
-                    config=EquityHistoryConfig().stop_config,
+                    config=StopHistoryConfig().stop_config,
                 )
             except ValueError:
                 continue
 
             order = prepare_limit_order_from_trigger(
-                side="LONG",
+                side=side,
                 trigger_price=float(result["trigger_price"]),
                 tick_size=tick_size,
                 current_price_reference=float(result["current_price_reference"]),
@@ -335,14 +296,18 @@ def main() -> int:
             if candle_date < lifecycle_start.date():
                 continue
 
-            per_unit_risk = max(0.0, entry_price - float(result["trigger_price"]))
-            total_risk = per_unit_risk * quantity
+            if side == "LONG":
+                per_unit_risk = max(0.0, entry_price - float(result["trigger_price"]))
+            else:
+                per_unit_risk = max(0.0, float(result["trigger_price"]) - entry_price)
+
+            total_risk = per_unit_risk * abs(int(position["quantity"]))
 
             rows_to_print.append([
-                tradingsymbol,
+                position["tradingsymbol"],
                 str(candle_date),
-                "LONG",
-                str(quantity),
+                side,
+                str(abs(int(position["quantity"]))),
                 f"{entry_price:.2f}",
                 f"{result['current_price_reference']:.2f}",
                 f"{result['trigger_price']:.2f}",
@@ -357,10 +322,10 @@ def main() -> int:
             ])
 
     if not rows_to_print:
-        print("No reconstructable equity stop-history rows found.")
+        print("No reconstructable stop-history rows found.")
         return 0
 
-    print("RECONSTRUCTED EQUITY STOP HISTORY - REAL DATA - EOD COMPUTATION")
+    print("RECONSTRUCTED STOP HISTORY - REAL DATA - EOD COMPUTATION")
     print_table(
         headers=[
             "Tradingsymbol",
