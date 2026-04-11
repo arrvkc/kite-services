@@ -1,0 +1,1 @@
+source_unique_key,trade_id,order_id,symbol,trade_type,quantity,price,order_execution_time,trade_date,exchange,segment,source_file,source_row_number,duplicate_group_size,all_rows_identical
