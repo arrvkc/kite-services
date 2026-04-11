@@ -45,24 +45,35 @@ def get_all_equity_positions(kite: KiteConnect) -> List[Dict]:
             continue
         out.append(p)
 
-    seen = {(str(p.get("exchange") or "").strip().upper(), str(p.get("tradingsymbol") or "").strip()) for p in out}
+    seen = {
+        (str(p.get("exchange") or "").strip().upper(), str(p.get("tradingsymbol") or "").strip())
+        for p in out
+    }
 
     try:
         holdings = kite.holdings() or []
-    except Exception:
-        holdings = []
+    except Exception as exc:
+        raise RuntimeError(f"Failed to fetch holdings: {exc}")
 
-    for h in holdings:
-        exchange = str(h.get("exchange") or "NSE").strip().upper()
-        tradingsymbol = str(h.get("tradingsymbol") or "").strip()
-        quantity = int(h.get("quantity") or 0) + int(h.get("t1_quantity") or 0)
-        if quantity <= 0 or not tradingsymbol:
+    for holding in holdings:
+        exchange = str(holding.get("exchange") or "NSE").strip().upper()
+        tradingsymbol = str(holding.get("tradingsymbol") or "").strip()
+
+        free_qty = int(holding.get("quantity") or 0)
+        t1_qty = int(holding.get("t1_quantity") or 0)
+        collateral_qty = int(holding.get("collateral_quantity") or 0)
+
+        effective_quantity = free_qty + t1_qty + collateral_qty
+
+        if effective_quantity <= 0 or not tradingsymbol:
             continue
+
         key = (exchange, tradingsymbol)
         if key in seen:
             continue
-        h = dict(h)
-        h["quantity"] = quantity
+
+        h = dict(holding)
+        h["quantity"] = effective_quantity
         h["average_price"] = float(h.get("average_price") or 0.0)
         h["product"] = "HOLDING"
         out.append(h)
@@ -122,9 +133,14 @@ def print_table(headers: List[str], rows: List[List[str]]) -> None:
         print(fmt(row))
 
 
-def build_preview_rows(user_id: str, symbol: Optional[str] = None, config: EquityPreviewConfig = EquityPreviewConfig()) -> List[List[str]]:
+def build_preview_rows(
+    user_id: str,
+    symbol: Optional[str] = None,
+    config: EquityPreviewConfig = EquityPreviewConfig(),
+) -> List[List[str]]:
     kite = get_kite_client(user_id)
-    positions = filter_equity_positions(get_all_equity_positions(kite), symbol=symbol)
+    all_positions = get_all_equity_positions(kite)
+    positions = filter_equity_positions(all_positions, symbol=symbol)
 
     rows: List[List[str]] = []
 

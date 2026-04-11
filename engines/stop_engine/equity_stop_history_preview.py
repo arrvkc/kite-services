@@ -49,24 +49,35 @@ def get_all_equity_positions(kite: KiteConnect) -> List[Dict]:
             continue
         out.append(p)
 
-    seen = {(str(p.get("exchange") or "").strip().upper(), str(p.get("tradingsymbol") or "").strip()) for p in out}
+    seen = {
+        (str(p.get("exchange") or "").strip().upper(), str(p.get("tradingsymbol") or "").strip())
+        for p in out
+    }
 
     try:
         holdings = kite.holdings() or []
-    except Exception:
-        holdings = []
+    except Exception as exc:
+        raise RuntimeError(f"Failed to fetch holdings: {exc}")
 
-    for h in holdings:
-        exchange = str(h.get("exchange") or "NSE").strip().upper()
-        tradingsymbol = str(h.get("tradingsymbol") or "").strip()
-        quantity = int(h.get("quantity") or 0) + int(h.get("t1_quantity") or 0)
-        if quantity <= 0 or not tradingsymbol:
+    for holding in holdings:
+        exchange = str(holding.get("exchange") or "NSE").strip().upper()
+        tradingsymbol = str(holding.get("tradingsymbol") or "").strip()
+
+        free_qty = int(holding.get("quantity") or 0)
+        t1_qty = int(holding.get("t1_quantity") or 0)
+        collateral_qty = int(holding.get("collateral_quantity") or 0)
+
+        effective_quantity = free_qty + t1_qty + collateral_qty
+
+        if effective_quantity <= 0 or not tradingsymbol:
             continue
+
         key = (exchange, tradingsymbol)
         if key in seen:
             continue
-        h = dict(h)
-        h["quantity"] = quantity
+
+        h = dict(holding)
+        h["quantity"] = effective_quantity
         h["average_price"] = float(h.get("average_price") or 0.0)
         h["product"] = "HOLDING"
         out.append(h)
@@ -89,7 +100,12 @@ def candles_to_dicts(raw_candles: List[Dict]) -> List[Dict]:
     ]
 
 
-def get_completed_daily_candles(kite: KiteConnect, instrument_token: int, start_date: date, config: EquityHistoryConfig) -> List[Dict]:
+def get_completed_daily_candles(
+    kite: KiteConnect,
+    instrument_token: int,
+    start_date: date,
+    config: EquityHistoryConfig,
+) -> List[Dict]:
     from_dt = datetime.combine(start_date, datetime.min.time()) - timedelta(days=60)
     to_dt = datetime.now()
     raw = kite.historical_data(
@@ -110,7 +126,12 @@ def build_db_instrument_key(exchange: str, tradingsymbol: str) -> str:
     return f"{ex}|{ex}|{tradingsymbol}"
 
 
-def fetch_current_lifecycle_start(dsn: str, broker: str, account_id: str, instrument_key: str) -> Tuple[datetime, Decimal]:
+def fetch_current_lifecycle_start(
+    dsn: str,
+    broker: str,
+    account_id: str,
+    instrument_key: str,
+) -> Tuple[datetime, Decimal]:
     sql = """
         SELECT execution_timestamp, signed_quantity, trade_id, order_id
         FROM raw_broker_trades
