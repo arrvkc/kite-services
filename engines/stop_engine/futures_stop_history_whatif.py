@@ -14,8 +14,8 @@ Supported modes:
 2. Explicit entry price:
    PYTHONPATH=.:services python engines/stop_engine/futures_stop_history_whatif.py HDFCBANK --contract-type near --entry-date 2026-03-27 --entry-price 766.60
 
-3. Explicit quantity:
-   PYTHONPATH=.:services python engines/stop_engine/futures_stop_history_whatif.py HDFCBANK --contract-type near --entry-date 2026-03-27 --quantity 4400
+3. Explicit lots:
+   PYTHONPATH=.:services python engines/stop_engine/futures_stop_history_whatif.py HDFCBANK --contract-type near --entry-date 2026-03-27 --lots 8
 
 4. End date override:
    PYTHONPATH=.:services python engines/stop_engine/futures_stop_history_whatif.py HDFCBANK --contract-type near --entry-date 2026-03-27 --end-date 2026-04-10
@@ -31,6 +31,8 @@ Notes:
 - It does not require a current position.
 - It does not use raw_broker_trades.
 - It does not persist state.
+- Default quantity is 1 lot.
+- User input is in lots, not units.
 """
 
 from __future__ import annotations
@@ -58,7 +60,6 @@ VALID_CONTRACT_TYPES = {"near", "next", "far"}
 class FuturesWhatIfConfig:
     candle_interval: str = "day"
     warmup_days: int = 90
-    default_quantity: int = 1
     exchange: str = "NFO"
     stop_config: StopComputationConfig = StopComputationConfig()
 
@@ -70,20 +71,20 @@ Examples:
   Use entry-date close as entry price:
     PYTHONPATH=.:services python engines/stop_engine/futures_stop_history_whatif.py HDFCBANK --contract-type near --entry-date 2026-03-27
 
-  Use entry-date close and quantity 4400:
-    PYTHONPATH=.:services python engines/stop_engine/futures_stop_history_whatif.py HDFCBANK --contract-type near --entry-date 2026-03-27 --quantity 4400
+  Use entry-date close and 8 lots:
+    PYTHONPATH=.:services python engines/stop_engine/futures_stop_history_whatif.py HDFCBANK --contract-type near --entry-date 2026-03-27 --lots 8
 
   Override entry price explicitly:
-    PYTHONPATH=.:services python engines/stop_engine/futures_stop_history_whatif.py HDFCBANK --contract-type near --entry-date 2026-03-27 --entry-price 766.60 --quantity 4400
+    PYTHONPATH=.:services python engines/stop_engine/futures_stop_history_whatif.py HDFCBANK --contract-type near --entry-date 2026-03-27 --entry-price 766.60 --lots 8
 
   Stop history only until a chosen end date:
-    PYTHONPATH=.:services python engines/stop_engine/futures_stop_history_whatif.py HDFCBANK --contract-type near --entry-date 2026-03-27 --quantity 4400 --end-date 2026-04-10
+    PYTHONPATH=.:services python engines/stop_engine/futures_stop_history_whatif.py HDFCBANK --contract-type near --entry-date 2026-03-27 --lots 8 --end-date 2026-04-10
 
   Show summary above the output:
-    PYTHONPATH=.:services python engines/stop_engine/futures_stop_history_whatif.py HDFCBANK --contract-type near --entry-date 2026-03-27 --quantity 4400 --show-summary
+    PYTHONPATH=.:services python engines/stop_engine/futures_stop_history_whatif.py HDFCBANK --contract-type near --entry-date 2026-03-27 --lots 8 --show-summary
 
   CSV output:
-    PYTHONPATH=.:services python engines/stop_engine/futures_stop_history_whatif.py HDFCBANK --contract-type near --entry-date 2026-03-27 --quantity 4400 --format csv
+    PYTHONPATH=.:services python engines/stop_engine/futures_stop_history_whatif.py HDFCBANK --contract-type near --entry-date 2026-03-27 --lots 8 --format csv
 
   Exact futures symbol override:
     PYTHONPATH=.:services python engines/stop_engine/futures_stop_history_whatif.py HDFCBANK --futures-symbol HDFCBANK26APRFUT --entry-date 2026-03-27
@@ -98,7 +99,7 @@ Examples:
     parser.add_argument("--futures-symbol", default=None, help="Optional exact futures tradingsymbol override, e.g. HDFCBANK26APRFUT")
     parser.add_argument("--entry-date", required=True, help="Entry date in YYYY-MM-DD")
     parser.add_argument("--entry-price", type=float, default=None, help="Override entry price; if omitted, entry date close is used")
-    parser.add_argument("--quantity", type=int, default=1, help="Scenario quantity; default 1")
+    parser.add_argument("--lots", type=int, default=1, help="Scenario lots; default 1 lot")
     parser.add_argument("--side", choices=["LONG", "SHORT"], default="LONG", help="Scenario side; default LONG")
     parser.add_argument("--end-date", default=None, help="Optional end date in YYYY-MM-DD; default today")
     parser.add_argument("--tick-size", type=float, default=0.05, help="Tick size; default 0.05")
@@ -257,8 +258,8 @@ def main() -> int:
 
     if end_date < entry_date:
         raise ValueError("end_date cannot be before entry_date")
-    if args.quantity <= 0:
-        raise ValueError("quantity must be positive")
+    if args.lots <= 0:
+        raise ValueError("lots must be positive")
     if args.tick_size <= 0:
         raise ValueError("tick_size must be positive")
 
@@ -273,6 +274,8 @@ def main() -> int:
     instrument_token = int(instrument["instrument_token"])
     tradingsymbol = str(instrument["tradingsymbol"])
     exchange = "NFO"
+    lot_size = int(instrument.get("lot_size") or 1)
+    quantity_units = args.lots * lot_size
 
     candles = get_completed_daily_candles(
         kite=kite,
@@ -320,14 +323,15 @@ def main() -> int:
         else:
             per_unit_risk = max(0.0, float(result["trigger_price"]) - entry_price)
 
-        total_risk = per_unit_risk * args.quantity
+        total_risk = per_unit_risk * quantity_units
 
         rows.append([
             tradingsymbol,
             exchange,
             str(candle_date),
             args.side,
-            str(args.quantity),
+            str(args.lots),
+            str(quantity_units),
             f"{entry_price:.2f}",
             f"{result['current_price_reference']:.2f}",
             f"{result['trigger_price']:.2f}",
@@ -350,6 +354,7 @@ def main() -> int:
         "Exchange",
         "Date",
         "Side",
+        "Lots",
         "Qty",
         "Entry Price",
         "Close Ref",
@@ -372,7 +377,9 @@ def main() -> int:
         print(f"contract_type={args.contract_type}")
         print(f"entry_date={entry_date}")
         print(f"entry_price={entry_price:.2f}")
-        print(f"quantity={args.quantity}")
+        print(f"lots={args.lots}")
+        print(f"lot_size={lot_size}")
+        print(f"quantity_units={quantity_units}")
         print(f"side={args.side}")
         print(f"end_date={end_date}")
         print("")
