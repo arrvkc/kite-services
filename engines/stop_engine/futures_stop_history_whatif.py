@@ -3,24 +3,28 @@
 Futures stop history what-if simulator.
 
 Primary mode:
-- User gives exact futures symbol and entry date
+- User gives underlying symbol and contract type
+- Script resolves near / next / far from the NFO expiry ladder
 - Script fetches the close price for the entry date and uses that as entry price
 
-Other supported modes:
-1. Date-only entry:
-   PYTHONPATH=.:services python engines/stop_engine/futures_stop_history_whatif.py HDFCBANK26APRFUT --entry-date 2026-03-27
+Supported modes:
+1. Underlying + contract type + entry date:
+   PYTHONPATH=.:services python engines/stop_engine/futures_stop_history_whatif.py HDFCBANK --contract-type near --entry-date 2026-03-27
 
 2. Explicit entry price:
-   PYTHONPATH=.:services python engines/stop_engine/futures_stop_history_whatif.py HDFCBANK26APRFUT --entry-date 2026-03-27 --entry-price 766.60
+   PYTHONPATH=.:services python engines/stop_engine/futures_stop_history_whatif.py HDFCBANK --contract-type near --entry-date 2026-03-27 --entry-price 766.60
 
 3. Explicit quantity:
-   PYTHONPATH=.:services python engines/stop_engine/futures_stop_history_whatif.py HDFCBANK26APRFUT --entry-date 2026-03-27 --quantity 4400
+   PYTHONPATH=.:services python engines/stop_engine/futures_stop_history_whatif.py HDFCBANK --contract-type near --entry-date 2026-03-27 --quantity 4400
 
 4. End date override:
-   PYTHONPATH=.:services python engines/stop_engine/futures_stop_history_whatif.py HDFCBANK26APRFUT --entry-date 2026-03-27 --end-date 2026-04-10
+   PYTHONPATH=.:services python engines/stop_engine/futures_stop_history_whatif.py HDFCBANK --contract-type near --entry-date 2026-03-27 --end-date 2026-04-10
 
 5. CSV-style output:
-   PYTHONPATH=.:services python engines/stop_engine/futures_stop_history_whatif.py HDFCBANK26APRFUT --entry-date 2026-03-27 --format csv
+   PYTHONPATH=.:services python engines/stop_engine/futures_stop_history_whatif.py HDFCBANK --contract-type near --entry-date 2026-03-27 --format csv
+
+6. Exact futures symbol override:
+   PYTHONPATH=.:services python engines/stop_engine/futures_stop_history_whatif.py HDFCBANK --futures-symbol HDFCBANK26APRFUT --entry-date 2026-03-27
 
 Notes:
 - This is a what-if / reconstructed path.
@@ -47,6 +51,8 @@ from engines.stop_engine.stop_computation_engine import (
     prepare_limit_order_from_trigger,
 )
 
+VALID_CONTRACT_TYPES = {"near", "next", "far"}
+
 
 @dataclass(frozen=True)
 class FuturesWhatIfConfig:
@@ -62,29 +68,34 @@ def parse_args() -> argparse.Namespace:
 Examples:
 
   Use entry-date close as entry price:
-    PYTHONPATH=.:services python engines/stop_engine/futures_stop_history_whatif.py HDFCBANK26APRFUT --entry-date 2026-03-27
+    PYTHONPATH=.:services python engines/stop_engine/futures_stop_history_whatif.py HDFCBANK --contract-type near --entry-date 2026-03-27
 
   Use entry-date close and quantity 4400:
-    PYTHONPATH=.:services python engines/stop_engine/futures_stop_history_whatif.py HDFCBANK26APRFUT --entry-date 2026-03-27 --quantity 4400
+    PYTHONPATH=.:services python engines/stop_engine/futures_stop_history_whatif.py HDFCBANK --contract-type near --entry-date 2026-03-27 --quantity 4400
 
   Override entry price explicitly:
-    PYTHONPATH=.:services python engines/stop_engine/futures_stop_history_whatif.py HDFCBANK26APRFUT --entry-date 2026-03-27 --entry-price 766.60 --quantity 4400
+    PYTHONPATH=.:services python engines/stop_engine/futures_stop_history_whatif.py HDFCBANK --contract-type near --entry-date 2026-03-27 --entry-price 766.60 --quantity 4400
 
   Stop history only until a chosen end date:
-    PYTHONPATH=.:services python engines/stop_engine/futures_stop_history_whatif.py HDFCBANK26APRFUT --entry-date 2026-03-27 --quantity 4400 --end-date 2026-04-10
+    PYTHONPATH=.:services python engines/stop_engine/futures_stop_history_whatif.py HDFCBANK --contract-type near --entry-date 2026-03-27 --quantity 4400 --end-date 2026-04-10
 
   Show summary above the output:
-    PYTHONPATH=.:services python engines/stop_engine/futures_stop_history_whatif.py HDFCBANK26APRFUT --entry-date 2026-03-27 --quantity 4400 --show-summary
+    PYTHONPATH=.:services python engines/stop_engine/futures_stop_history_whatif.py HDFCBANK --contract-type near --entry-date 2026-03-27 --quantity 4400 --show-summary
 
   CSV output:
-    PYTHONPATH=.:services python engines/stop_engine/futures_stop_history_whatif.py HDFCBANK26APRFUT --entry-date 2026-03-27 --quantity 4400 --format csv
+    PYTHONPATH=.:services python engines/stop_engine/futures_stop_history_whatif.py HDFCBANK --contract-type near --entry-date 2026-03-27 --quantity 4400 --format csv
+
+  Exact futures symbol override:
+    PYTHONPATH=.:services python engines/stop_engine/futures_stop_history_whatif.py HDFCBANK --futures-symbol HDFCBANK26APRFUT --entry-date 2026-03-27
 """
     parser = argparse.ArgumentParser(
         description="Futures stop history what-if simulator",
         epilog=examples,
         formatter_class=argparse.RawTextHelpFormatter,
     )
-    parser.add_argument("symbol", help="Exact futures symbol, e.g. HDFCBANK26APRFUT")
+    parser.add_argument("symbol", help="Underlying symbol, e.g. HDFCBANK")
+    parser.add_argument("--contract-type", default="near", choices=["near", "next", "far"], help="Contract selection from expiry ladder")
+    parser.add_argument("--futures-symbol", default=None, help="Optional exact futures tradingsymbol override, e.g. HDFCBANK26APRFUT")
     parser.add_argument("--entry-date", required=True, help="Entry date in YYYY-MM-DD")
     parser.add_argument("--entry-price", type=float, default=None, help="Override entry price; if omitted, entry date close is used")
     parser.add_argument("--quantity", type=int, default=1, help="Scenario quantity; default 1")
@@ -108,22 +119,60 @@ def parse_ymd(value: str) -> date:
     return datetime.strptime(value, "%Y-%m-%d").date()
 
 
-def find_futures_instrument(kite: KiteConnect, symbol: str, exchange: str = "NFO") -> Dict:
-    instruments = kite.instruments(exchange)
-    matches = [
-        inst for inst in instruments
-        if str(inst.get("tradingsymbol") or "").upper() == symbol.upper()
-    ]
+def get_nfo_futures_instruments(kite: KiteConnect) -> List[Dict]:
+    return [i for i in kite.instruments("NFO") if i.get("instrument_type") == "FUT"]
 
-    if not matches:
-        raise ValueError(f"No {exchange} futures instrument found for symbol={symbol}")
 
-    fut_matches = [m for m in matches if str(m.get("instrument_type") or "").upper() == "FUT"]
-    if len(fut_matches) == 1:
-        return fut_matches[0]
-    if fut_matches:
-        return fut_matches[0]
-    return matches[0]
+def get_market_expiry_ladder(kite: KiteConnect, symbol: Optional[str] = None) -> Dict[str, List[Dict]]:
+    today = datetime.now().date()
+    instruments = get_nfo_futures_instruments(kite)
+    grouped: Dict[str, List[Dict]] = {}
+
+    for inst in instruments:
+        expiry = inst.get("expiry")
+        underlying = inst.get("name")
+        if not expiry or not underlying:
+            continue
+        if expiry < today:
+            continue
+        if symbol and underlying.upper() != symbol.upper():
+            continue
+        grouped.setdefault(underlying, []).append(inst)
+
+    for underlying in grouped:
+        grouped[underlying] = sorted(grouped[underlying], key=lambda x: x["expiry"])
+
+    return grouped
+
+
+def resolve_futures_instrument(
+    kite: KiteConnect,
+    underlying: str,
+    contract_type: str,
+    futures_symbol: Optional[str] = None,
+) -> Dict:
+    instruments = get_nfo_futures_instruments(kite)
+
+    if futures_symbol:
+        matches = [
+            inst for inst in instruments
+            if str(inst.get("tradingsymbol") or "").upper() == futures_symbol.upper()
+        ]
+        if not matches:
+            raise ValueError(f"No NFO futures instrument found for futures_symbol={futures_symbol}")
+        return matches[0]
+
+    if contract_type not in VALID_CONTRACT_TYPES:
+        raise ValueError("contract_type must be one of: near, next, far")
+
+    ladder_map = get_market_expiry_ladder(kite, symbol=underlying)
+    ladder = ladder_map.get(underlying.upper(), [])
+    idx = {"near": 0, "next": 1, "far": 2}[contract_type]
+
+    if idx >= len(ladder):
+        raise ValueError(f"No {contract_type}-month futures contract found for underlying={underlying}")
+
+    return ladder[idx]
 
 
 def candles_to_dicts(raw_candles: List[Dict]) -> List[Dict]:
@@ -214,11 +263,16 @@ def main() -> int:
         raise ValueError("tick_size must be positive")
 
     kite = get_kite_client(args.user_id)
-    instrument = find_futures_instrument(kite, args.symbol, exchange=config.exchange)
+    instrument = resolve_futures_instrument(
+        kite=kite,
+        underlying=args.symbol.upper(),
+        contract_type=args.contract_type,
+        futures_symbol=args.futures_symbol,
+    )
 
     instrument_token = int(instrument["instrument_token"])
     tradingsymbol = str(instrument["tradingsymbol"])
-    exchange = str(instrument["exchange"])
+    exchange = "NFO"
 
     candles = get_completed_daily_candles(
         kite=kite,
@@ -312,8 +366,10 @@ def main() -> int:
 
     if args.show_summary:
         print("FUTURES STOP HISTORY WHAT-IF")
-        print(f"symbol={tradingsymbol}")
+        print(f"underlying={args.symbol.upper()}")
+        print(f"resolved_tradingsymbol={tradingsymbol}")
         print(f"exchange={exchange}")
+        print(f"contract_type={args.contract_type}")
         print(f"entry_date={entry_date}")
         print(f"entry_price={entry_price:.2f}")
         print(f"quantity={args.quantity}")
