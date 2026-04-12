@@ -135,32 +135,44 @@ class EquityTrendRunner:
         )
         return weekly[REQUIRED_COLUMNS]
 
-    def build_raw_bars_for_symbol(
+    @staticmethod
+    def _normalize_asof_time(asof_time: Any) -> datetime:
+        ts = pd.Timestamp(asof_time)
+        if ts.tz is None:
+            ts = ts.tz_localize("UTC")
+        else:
+            ts = ts.tz_convert("UTC")
+        return ts.to_pydatetime()
+
+    def build_raw_bars_for_symbol_asof(
         self,
         symbol: str,
+        asof_time: Any,
         daily_lookback_days: int = 900,
         hourly_lookback_days: int = 120,
     ) -> tuple[Dict[str, pd.DataFrame], Dict[str, Any]]:
         instrument = self.resolve_equity_instrument(symbol)
-        now = datetime.now(timezone.utc)
+        asof_dt = self._normalize_asof_time(asof_time)
 
         daily_df = self.fetch_historical_data(
             instrument_token=instrument.instrument_token,
-            from_dt=now - timedelta(days=daily_lookback_days),
-            to_dt=now,
+            from_dt=asof_dt - timedelta(days=daily_lookback_days),
+            to_dt=asof_dt + timedelta(days=1),
             interval="day",
             oi=False,
             continuous=False,
         )
+        daily_df = daily_df.loc[daily_df["timestamp"] <= pd.Timestamp(asof_dt)].reset_index(drop=True)
 
         hourly_df = self.fetch_historical_data(
             instrument_token=instrument.instrument_token,
-            from_dt=now - timedelta(days=hourly_lookback_days),
-            to_dt=now,
+            from_dt=asof_dt - timedelta(days=hourly_lookback_days),
+            to_dt=asof_dt + timedelta(days=1),
             interval="60minute",
             oi=False,
             continuous=False,
         )
+        hourly_df = hourly_df.loc[hourly_df["timestamp"] <= pd.Timestamp(asof_dt)].reset_index(drop=True)
 
         weekly_df = self.resample_weekly_from_daily(daily_df)
 
@@ -182,6 +194,54 @@ class EquityTrendRunner:
         }
 
         return raw_bars, instrument_metadata
+
+    def build_raw_bars_for_symbol(
+        self,
+        symbol: str,
+        daily_lookback_days: int = 900,
+        hourly_lookback_days: int = 120,
+    ) -> tuple[Dict[str, pd.DataFrame], Dict[str, Any]]:
+        now = datetime.now(timezone.utc)
+        return self.build_raw_bars_for_symbol_asof(
+            symbol=symbol,
+            asof_time=now,
+            daily_lookback_days=daily_lookback_days,
+            hourly_lookback_days=hourly_lookback_days,
+        )
+
+    def run_for_symbol_asof(
+        self,
+        symbol: str,
+        asof_time: Any,
+        daily_lookback_days: int = 900,
+        hourly_lookback_days: int = 120,
+    ) -> Dict[str, Any]:
+        raw_bars, instrument_metadata = self.build_raw_bars_for_symbol_asof(
+            symbol=symbol,
+            asof_time=asof_time,
+            daily_lookback_days=daily_lookback_days,
+            hourly_lookback_days=hourly_lookback_days,
+        )
+
+        for tf_name, df in raw_bars.items():
+            if df.empty:
+                raise RuntimeError(f"No {tf_name} bars fetched for {symbol}")
+
+        payload = evaluate_trend(
+            instrument=symbol.upper(),
+            asof_time=asof_time,
+            calendar=self.exchange,
+            raw_bars=raw_bars,
+            instrument_metadata=instrument_metadata,
+        )
+
+        return {
+            "symbol": symbol.upper(),
+            "exchange": instrument_metadata["resolved_exchange"],
+            "tradingsymbol": instrument_metadata["resolved_tradingsymbol"],
+            "instrument_token": instrument_metadata["instrument_token"],
+            "payload": payload,
+        }
 
     def run_for_symbol(
         self,

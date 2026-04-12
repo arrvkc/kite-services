@@ -6,7 +6,6 @@ from typing import Any, Dict, List
 import pandas as pd
 from kiteconnect import KiteConnect
 
-from ..engine import evaluate_trend
 from .equity_trend_runner import EquityTrendRunner
 
 
@@ -43,9 +42,10 @@ class EquityTrendHistoryRunner:
         if history_days <= 0:
             raise ValueError("history_days must be positive.")
 
-        raw_bars, instrument_metadata = self.equity_runner.build_raw_bars_for_symbol(
+        # Keep this only for discovering the last N trading-day cut points.
+        raw_bars, _ = self.equity_runner.build_raw_bars_for_symbol(
             symbol=symbol,
-            daily_lookback_days=daily_lookback_days,
+            daily_lookback_days=30,
             hourly_lookback_days=hourly_lookback_days,
         )
 
@@ -68,29 +68,25 @@ class EquityTrendHistoryRunner:
         selected_cut_points = daily_cut_points[-history_days:]
 
         rows: List[Dict[str, Any]] = []
+        last_result: Dict[str, Any] | None = None
 
         for asof_time in selected_cut_points:
-            subset_raw_bars = {
-                "weekly": raw_bars["weekly"].loc[raw_bars["weekly"]["timestamp"] <= asof_time].copy(),
-                "daily": raw_bars["daily"].loc[raw_bars["daily"]["timestamp"] <= asof_time].copy(),
-                "hourly": raw_bars["hourly"].loc[raw_bars["hourly"]["timestamp"] <= asof_time].copy(),
-            }
-
-            payload = evaluate_trend(
-                instrument=symbol.upper(),
+            result = self.equity_runner.run_for_symbol_asof(
+                symbol=symbol,
                 asof_time=asof_time,
-                calendar=self.exchange,
-                raw_bars=subset_raw_bars,
-                instrument_metadata=instrument_metadata,
+                daily_lookback_days=daily_lookback_days,
+                hourly_lookback_days=hourly_lookback_days,
             )
+            last_result = result
+            payload = result["payload"]
 
             rows.append(
                 {
                     "date": pd.Timestamp(asof_time).date().isoformat(),
-                    "symbol": symbol.upper(),
-                    "exchange": instrument_metadata["resolved_exchange"],
-                    "tradingsymbol": instrument_metadata["resolved_tradingsymbol"],
-                    "instrument_token": instrument_metadata["instrument_token"],
+                    "symbol": result["symbol"],
+                    "exchange": result["exchange"],
+                    "tradingsymbol": result["tradingsymbol"],
+                    "instrument_token": result["instrument_token"],
                     "label": payload["label"],
                     "confidence": payload["confidence"],
                     "aggregate_score": payload["aggregate_score"],
@@ -113,10 +109,13 @@ class EquityTrendHistoryRunner:
         ]
         history_df = history_df[preferred_columns]
 
+        if last_result is None:
+            raise RuntimeError("No history rows were produced.")
+
         return TrendHistoryResult(
             symbol=symbol.upper(),
-            exchange=instrument_metadata["resolved_exchange"],
-            tradingsymbol=instrument_metadata["resolved_tradingsymbol"],
-            instrument_token=instrument_metadata["instrument_token"],
+            exchange=last_result["exchange"],
+            tradingsymbol=last_result["tradingsymbol"],
+            instrument_token=last_result["instrument_token"],
             history=history_df,
         )
