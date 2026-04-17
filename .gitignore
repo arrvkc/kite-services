@@ -5,3 +5,16 @@ __pycache__/
 *.pyd
 .env
 .DS_Store
+.idea/
+
+directory_structure.txt
+focused_dirs.txt
+focused_files.txt
+relevant_code_files.txt
+bulk_exit_candidate_files.txt
+cli_patterns.txt
+trading_code_hits.txt
+
+*.zip
+
+services/**/*.csv
