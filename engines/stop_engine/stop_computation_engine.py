@@ -157,7 +157,12 @@ def compute_deterministic_stop_eod(
         validated_stop = min(raw_stop, current_price_reference - min_distance)
         validated_stop = floor_to_tick(validated_stop, tick_size)
         if previous_trigger_price is not None:
-            validated_stop = max(validated_stop, floor_to_tick(previous_trigger_price, tick_size))
+            previous_trigger_floor = floor_to_tick(previous_trigger_price, tick_size)
+            if validated_stop < previous_trigger_floor:
+                raise ValueError(
+                    f"Monotonicity violation (LONG): computed stop {validated_stop} is below previous stop {previous_trigger_floor}"
+                )
+            validated_stop = max(validated_stop, previous_trigger_floor)
         if validated_stop >= current_price_reference:
             validated_stop = floor_to_tick(current_price_reference - min_distance, tick_size)
         trigger_price = validated_stop
@@ -168,10 +173,23 @@ def compute_deterministic_stop_eod(
         validated_stop = max(raw_stop, current_price_reference + min_distance)
         validated_stop = ceil_to_tick(validated_stop, tick_size)
         if previous_trigger_price is not None:
-            validated_stop = min(validated_stop, ceil_to_tick(previous_trigger_price, tick_size))
+            previous_trigger_ceil = ceil_to_tick(previous_trigger_price, tick_size)
+            if validated_stop > previous_trigger_ceil:
+                raise ValueError(
+                    f"Monotonicity violation (SHORT): computed stop {validated_stop} is above previous stop {previous_trigger_ceil}"
+                )
+            validated_stop = min(validated_stop, previous_trigger_ceil)
         if validated_stop <= current_price_reference:
             validated_stop = ceil_to_tick(current_price_reference + min_distance, tick_size)
         trigger_price = validated_stop
+
+    # MIN DISTANCE VALIDATION (HARD CHECK)
+    distance = abs(current_price_reference - trigger_price)
+
+    if distance < min_distance:
+        raise ValueError(
+            f"Min distance violation: distance={distance:.4f}, required={min_distance:.4f}"
+        )
 
     update_required = material_change_required(
         old_trigger=previous_trigger_price,
