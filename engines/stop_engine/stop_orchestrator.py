@@ -23,6 +23,7 @@ from engines.stop_engine.stop_execution_engine import (
 from engines.stop_engine.stop_execution_engine import get_existing_active_gtt_map, extract_existing_trigger_price
 
 VALID_CONTRACT_TYPES = {"near", "next", "far"}
+MARKET_DATA_USER_ID = "XJ1877"
 
 
 @dataclass(frozen=True)
@@ -79,6 +80,7 @@ def find_positions(
         raise ValueError("contract_type must be one of: near, next, far")
 
     kite = get_kite_client(user_id)
+    market_data_kite = get_kite_client(MARKET_DATA_USER_ID)
     positions = get_all_futures_positions(
         user_id=user_id,
         exclude_zero_qty=True,
@@ -91,7 +93,7 @@ def find_positions(
     if not positions:
         return []
 
-    ladder_map = get_market_expiry_ladder(kite, symbol=symbol)
+    ladder_map = get_market_expiry_ladder(market_data_kite, symbol=symbol)
     idx = {"near": 0, "next": 1, "far": 2}[contract_type]
 
     selected_positions: List[Dict] = []
@@ -156,6 +158,8 @@ def build_execution_plans(
     config: StopOrchestratorConfig = StopOrchestratorConfig(),
 ) -> List[Dict]:
     kite = get_kite_client(user_id)
+    market_data_kite = get_kite_client(MARKET_DATA_USER_ID)
+
     existing_gtt_map = get_existing_active_gtt_map(kite)
     positions = find_positions(user_id=user_id, contract_type=contract_type, symbol=symbol)
 
@@ -175,7 +179,7 @@ def build_execution_plans(
         tick_size = float(position.get("tick_size") or 0.05)
         instrument_token = int(position["instrument_token"])
 
-        candles = get_completed_daily_candles(kite, instrument_token, config)
+        candles = get_completed_daily_candles(market_data_kite, instrument_token, config)
 
         key = (tradingsymbol, exchange, exit_transaction_type, abs_quantity, config.product)
         existing_gtt = existing_gtt_map.get(key)

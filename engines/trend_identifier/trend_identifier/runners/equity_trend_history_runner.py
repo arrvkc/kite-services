@@ -71,6 +71,14 @@ class EquityTrendHistoryRunner:
         last_result: Dict[str, Any] | None = None
 
         for asof_time in selected_cut_points:
+            raw_bars_asof, _ = self.equity_runner.build_raw_bars_for_symbol_asof(
+                symbol=symbol,
+                asof_time=asof_time,
+                daily_lookback_days=daily_lookback_days,
+                hourly_lookback_days=hourly_lookback_days,
+            )
+            daily_close = raw_bars_asof["daily"].iloc[-1]["close"]
+
             result = self.equity_runner.run_for_symbol_asof(
                 symbol=symbol,
                 asof_time=asof_time,
@@ -87,6 +95,7 @@ class EquityTrendHistoryRunner:
                     "exchange": result["exchange"],
                     "tradingsymbol": result["tradingsymbol"],
                     "instrument_token": result["instrument_token"],
+                    "close": daily_close,
                     "label": payload["label"],
                     "confidence": payload["confidence"],
                     "aggregate_score": payload["aggregate_score"],
@@ -98,10 +107,7 @@ class EquityTrendHistoryRunner:
 
         preferred_columns = [
             "date",
-            "symbol",
-            "exchange",
-            "tradingsymbol",
-            "instrument_token",
+            "close",
             "label",
             "confidence",
             "aggregate_score",
