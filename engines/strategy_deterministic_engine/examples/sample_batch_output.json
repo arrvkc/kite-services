@@ -1,0 +1,186 @@
+{
+  "spec_version": "strategy-engine-v2.0",
+  "batch_metadata": {
+    "ranking_mode": "overall_and_family",
+    "total_inputs": 4,
+    "published_count": 3,
+    "invalid_count": 1
+  },
+  "results": [
+    {
+      "mode": "public_payload",
+      "payload": {
+        "spec_version": "strategy-engine-v2.0",
+        "instrument": "SBIN",
+        "asof_time": "2026-04-19T15:30:00+05:30",
+        "strategy_family": "BULL_CALL_SPREAD",
+        "contract_month_selection": "NEAR_MONTH",
+        "final_strategy_strength": 62,
+        "include_in_top_n": true,
+        "rank_overall": 1,
+        "rank_in_family": 1,
+        "strategy_transition_state": "fast_track",
+        "reason_codes": [
+          "RULE_STRONG_BULLISH_DIRECTIONAL",
+          "CONTRACT_NEAR_MONTH_DTE",
+          "TRANSITION_FAST_TRACK",
+          "STRENGTH_ABOVE_TOPN_MIN"
+        ],
+        "input_snapshot": {
+          "label": "UP",
+          "confidence": 0.74,
+          "aggregate_score": 48.0,
+          "dte_near_month": 8,
+          "next_month_available": true,
+          "dte_next_month": 29,
+          "bull_count_5": 5,
+          "bear_count_5": 0,
+          "flat_count_5": 0,
+          "mean_score_3": 34.666666666666664,
+          "mean_conf_3": 0.6633333333333333,
+          "sign_flip_count_5": 0
+        },
+        "errors": []
+      },
+      "next_prior_committed_state": {
+        "instrument": "SBIN",
+        "asof_time": "2026-04-19T15:30:00+05:30",
+        "strategy_family": "BULL_CALL_SPREAD",
+        "contract_month_selection": "NEAR_MONTH",
+        "strategy_transition_state": "fast_track",
+        "pending_counter": 0,
+        "pending_candidate_family": null,
+        "pending_candidate_month": null,
+        "state_version": "strategy-engine-v2.0"
+      }
+    },
+    {
+      "mode": "public_payload",
+      "payload": {
+        "spec_version": "strategy-engine-v2.0",
+        "instrument": "TCS",
+        "asof_time": "2026-04-19T15:30:00+05:30",
+        "strategy_family": "IRON_CONDOR",
+        "contract_month_selection": "NEAR_MONTH",
+        "final_strategy_strength": 60,
+        "include_in_top_n": true,
+        "rank_overall": 2,
+        "rank_in_family": 1,
+        "strategy_transition_state": "stable",
+        "reason_codes": [
+          "RULE_MANDATORY_FLAT_MAPPING",
+          "CONTRACT_NEAR_MONTH_DTE",
+          "TRANSITION_STABLE",
+          "STRENGTH_ABOVE_TOPN_MIN"
+        ],
+        "input_snapshot": {
+          "label": "FLAT",
+          "confidence": 0.51,
+          "aggregate_score": 4.0,
+          "dte_near_month": 13,
+          "next_month_available": true,
+          "dte_next_month": 34,
+          "bull_count_5": 0,
+          "bear_count_5": 0,
+          "flat_count_5": 5,
+          "mean_score_3": 2.3333333333333335,
+          "mean_conf_3": 0.5033333333333333,
+          "sign_flip_count_5": 0
+        },
+        "errors": []
+      },
+      "next_prior_committed_state": {
+        "instrument": "TCS",
+        "asof_time": "2026-04-19T15:30:00+05:30",
+        "strategy_family": "IRON_CONDOR",
+        "contract_month_selection": "NEAR_MONTH",
+        "strategy_transition_state": "stable",
+        "pending_counter": 0,
+        "pending_candidate_family": null,
+        "pending_candidate_month": null,
+        "state_version": "strategy-engine-v2.0"
+      }
+    },
+    {
+      "mode": "public_payload",
+      "payload": {
+        "spec_version": "strategy-engine-v2.0",
+        "instrument": "INFY",
+        "asof_time": "2026-04-19T15:30:00+05:30",
+        "strategy_family": "BEAR_CALL_SPREAD",
+        "contract_month_selection": "NEAR_MONTH",
+        "final_strategy_strength": 44,
+        "include_in_top_n": false,
+        "rank_overall": null,
+        "rank_in_family": null,
+        "strategy_transition_state": "pending_upgrade",
+        "reason_codes": [
+          "RULE_STRONG_BEARISH_DIRECTIONAL",
+          "CONTRACT_NEXT_MONTH_DTE",
+          "TRANSITION_PENDING_UPGRADE",
+          "STRENGTH_BELOW_TOPN_MIN"
+        ],
+        "input_snapshot": {
+          "label": "DOWN",
+          "confidence": 0.66,
+          "aggregate_score": -46.0,
+          "dte_near_month": 5,
+          "next_month_available": true,
+          "dte_next_month": 27,
+          "bull_count_5": 0,
+          "bear_count_5": 5,
+          "flat_count_5": 0,
+          "mean_score_3": -33.666666666666664,
+          "mean_conf_3": 0.6033333333333334,
+          "sign_flip_count_5": 0
+        },
+        "errors": []
+      },
+      "next_prior_committed_state": {
+        "instrument": "INFY",
+        "asof_time": "2026-04-19T15:30:00+05:30",
+        "strategy_family": "BEAR_CALL_SPREAD",
+        "contract_month_selection": "NEAR_MONTH",
+        "strategy_transition_state": "pending_upgrade",
+        "pending_counter": 1,
+        "pending_candidate_family": "BEAR_PUT_SPREAD",
+        "pending_candidate_month": "NEXT_MONTH",
+        "state_version": "strategy-engine-v2.0"
+      }
+    },
+    {
+      "mode": "invalid_evaluation",
+      "invalid_evaluation_record": {
+        "instrument": "BAD1",
+        "asof_time": "2026-04-19T15:30:00+05:30",
+        "reason_codes": [
+          "GATE_INVALID_NUMERIC",
+          "GATE_INSUFFICIENT_HISTORY",
+          "GATE_INVALID_DTE"
+        ],
+        "errors": [
+          {
+            "code": "GATE_INVALID_NUMERIC",
+            "message": "confidence must be finite and within [0,1]"
+          },
+          {
+            "code": "GATE_INSUFFICIENT_HISTORY",
+            "message": "At least 5 completed daily evaluations are required"
+          },
+          {
+            "code": "GATE_INVALID_DTE",
+            "message": "dte_near_month must be an integer >= 0"
+          }
+        ],
+        "input_snapshot": {
+          "label": "UP",
+          "confidence": 1.2,
+          "aggregate_score": 30.0,
+          "dte_near_month": -1,
+          "next_month_available": false,
+          "dte_next_month": null
+        }
+      }
+    }
+  ]
+}

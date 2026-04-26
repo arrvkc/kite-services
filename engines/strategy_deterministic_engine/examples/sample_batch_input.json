@@ -1,0 +1,162 @@
+[
+  {
+    "instrument": "SBIN",
+    "asof_time": "2026-04-19T15:30:00+05:30",
+    "label": "UP",
+    "confidence": 0.74,
+    "aggregate_score": 48.0,
+    "internal_state": "CLASSIFIABLE",
+    "trend_history_w5": [
+      {
+        "label": "UP",
+        "confidence": 0.71,
+        "aggregate_score": 42.0
+      },
+      {
+        "label": "UP",
+        "confidence": 0.68,
+        "aggregate_score": 39.0
+      },
+      {
+        "label": "FLAT",
+        "confidence": 0.52,
+        "aggregate_score": 12.0
+      },
+      {
+        "label": "UP",
+        "confidence": 0.73,
+        "aggregate_score": 44.0
+      },
+      {
+        "label": "UP",
+        "confidence": 0.74,
+        "aggregate_score": 48.0
+      }
+    ],
+    "dte_near_month": 8,
+    "next_month_available": true,
+    "dte_next_month": 29,
+    "in_universe": true,
+    "prior_committed_state": null
+  },
+  {
+    "instrument": "TCS",
+    "asof_time": "2026-04-19T15:30:00+05:30",
+    "label": "FLAT",
+    "confidence": 0.51,
+    "aggregate_score": 4.0,
+    "internal_state": "CLASSIFIABLE",
+    "trend_history_w5": [
+      {
+        "label": "FLAT",
+        "confidence": 0.49,
+        "aggregate_score": 3.0
+      },
+      {
+        "label": "FLAT",
+        "confidence": 0.5,
+        "aggregate_score": 8.0
+      },
+      {
+        "label": "FLAT",
+        "confidence": 0.52,
+        "aggregate_score": -2.0
+      },
+      {
+        "label": "FLAT",
+        "confidence": 0.48,
+        "aggregate_score": 5.0
+      },
+      {
+        "label": "FLAT",
+        "confidence": 0.51,
+        "aggregate_score": 4.0
+      }
+    ],
+    "dte_near_month": 13,
+    "next_month_available": true,
+    "dte_next_month": 34,
+    "in_universe": true,
+    "prior_committed_state": {
+      "instrument": "TCS",
+      "asof_time": "2026-04-18T15:30:00+05:30",
+      "strategy_family": "IRON_CONDOR",
+      "contract_month_selection": "NEAR_MONTH",
+      "strategy_transition_state": "stable",
+      "pending_counter": 0,
+      "pending_candidate_family": null,
+      "pending_candidate_month": null,
+      "state_version": "strategy-engine-v2.0"
+    }
+  },
+  {
+    "instrument": "INFY",
+    "asof_time": "2026-04-19T15:30:00+05:30",
+    "label": "DOWN",
+    "confidence": 0.66,
+    "aggregate_score": -46.0,
+    "internal_state": "CLASSIFIABLE",
+    "trend_history_w5": [
+      {
+        "label": "DOWN",
+        "confidence": 0.64,
+        "aggregate_score": -37.0
+      },
+      {
+        "label": "DOWN",
+        "confidence": 0.63,
+        "aggregate_score": -39.0
+      },
+      {
+        "label": "FLAT",
+        "confidence": 0.5,
+        "aggregate_score": -12.0
+      },
+      {
+        "label": "DOWN",
+        "confidence": 0.65,
+        "aggregate_score": -43.0
+      },
+      {
+        "label": "DOWN",
+        "confidence": 0.66,
+        "aggregate_score": -46.0
+      }
+    ],
+    "dte_near_month": 5,
+    "next_month_available": true,
+    "dte_next_month": 27,
+    "in_universe": true,
+    "prior_committed_state": {
+      "instrument": "INFY",
+      "asof_time": "2026-04-18T15:30:00+05:30",
+      "strategy_family": "BEAR_CALL_SPREAD",
+      "contract_month_selection": "NEAR_MONTH",
+      "strategy_transition_state": "stable",
+      "pending_counter": 0,
+      "pending_candidate_family": null,
+      "pending_candidate_month": null,
+      "state_version": "strategy-engine-v2.0"
+    }
+  },
+  {
+    "instrument": "BAD1",
+    "asof_time": "2026-04-19T15:30:00+05:30",
+    "label": "UP",
+    "confidence": 1.2,
+    "aggregate_score": 30.0,
+    "internal_state": "CLASSIFIABLE",
+    "trend_history_w5": [
+      {
+        "label": "UP",
+        "confidence": 0.5,
+        "aggregate_score": 10.0
+      }
+    ],
+    "dte_near_month": -1,
+    "next_month_available": false,
+    "dte_next_month": null,
+    "in_universe": true,
+    "prior_committed_state": null
+  }
+]

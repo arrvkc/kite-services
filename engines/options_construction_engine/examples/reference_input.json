@@ -1,0 +1,40 @@
+{
+  "instrument": "ABC",
+  "asof_time": "2026-04-15T10:30:00Z",
+  "strategy_family": "BEAR_CALL_SPREAD",
+  "contract_month_selection": "NEXT_MONTH",
+  "final_strategy_strength": 72,
+  "underlying_spot_price": 150.0,
+  "lot_size": 100,
+  "strike_step": 5,
+  "option_chain": [
+    {
+      "tradingsymbol": "ABC24MAY155CE",
+      "instrument_token": 1002,
+      "expiry": "2026-05-28",
+      "strike": 155,
+      "option_type": "CE",
+      "bid_price": 3.0,
+      "ask_price": 3.5,
+      "last_price": 3.2,
+      "open_interest": 2200,
+      "volume": 700,
+      "delta": 0.2,
+      "data_timestamp": "2026-04-15T10:29:00Z"
+    },
+    {
+      "tradingsymbol": "ABC24MAY160CE",
+      "instrument_token": 1003,
+      "expiry": "2026-05-28",
+      "strike": 160,
+      "option_type": "CE",
+      "bid_price": 1.5,
+      "ask_price": 2.0,
+      "last_price": 1.7,
+      "open_interest": 1800,
+      "volume": 600,
+      "delta": 0.1,
+      "data_timestamp": "2026-04-15T10:29:00Z"
+    }
+  ]
+}

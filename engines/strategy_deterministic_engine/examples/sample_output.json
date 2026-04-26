@@ -1,0 +1,46 @@
+{
+  "mode": "public_payload",
+  "payload": {
+    "spec_version": "strategy-engine-v2.0",
+    "instrument": "SBIN",
+    "asof_time": "2026-04-19T15:30:00+05:30",
+    "strategy_family": "BULL_CALL_SPREAD",
+    "contract_month_selection": "NEAR_MONTH",
+    "final_strategy_strength": 62,
+    "include_in_top_n": false,
+    "rank_overall": null,
+    "rank_in_family": null,
+    "strategy_transition_state": "fast_track",
+    "reason_codes": [
+      "RULE_STRONG_BULLISH_DIRECTIONAL",
+      "CONTRACT_NEAR_MONTH_DTE",
+      "TRANSITION_FAST_TRACK"
+    ],
+    "input_snapshot": {
+      "label": "UP",
+      "confidence": 0.74,
+      "aggregate_score": 48.0,
+      "dte_near_month": 8,
+      "next_month_available": true,
+      "dte_next_month": 29,
+      "bull_count_5": 5,
+      "bear_count_5": 0,
+      "flat_count_5": 0,
+      "mean_score_3": 34.666666666666664,
+      "mean_conf_3": 0.6633333333333333,
+      "sign_flip_count_5": 0
+    },
+    "errors": []
+  },
+  "next_prior_committed_state": {
+    "instrument": "SBIN",
+    "asof_time": "2026-04-19T15:30:00+05:30",
+    "strategy_family": "BULL_CALL_SPREAD",
+    "contract_month_selection": "NEAR_MONTH",
+    "strategy_transition_state": "fast_track",
+    "pending_counter": 0,
+    "pending_candidate_family": null,
+    "pending_candidate_month": null,
+    "state_version": "strategy-engine-v2.0"
+  }
+}

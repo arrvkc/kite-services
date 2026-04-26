@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import sys
+import csv
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
@@ -22,6 +24,7 @@ from engines.stop_engine.stop_execution_engine import (
 )
 from engines.stop_engine.stop_execution_engine import get_existing_active_gtt_map, extract_existing_trigger_price
 
+logger = logging.getLogger(__name__)
 VALID_CONTRACT_TYPES = {"near", "next", "far"}
 MARKET_DATA_USER_ID = "XJ1877"
 
@@ -148,7 +151,15 @@ def get_completed_daily_candles(
         continuous=False,
         oi=True,
     )
-    return candles_to_dicts(raw)
+    candles = candles_to_dicts(raw)
+
+    today = datetime.now().date()
+    candles = [
+        c for c in candles
+        if c["date"].date() < today
+    ]
+
+    return candles
 
 
 def build_execution_plans(
@@ -169,115 +180,128 @@ def build_execution_plans(
     plans: List[Dict] = []
 
     for position in positions:
-        tradingsymbol = position["tradingsymbol"]
-        exchange = position.get("exchange") or "NFO"
-        quantity = int(position["quantity"])
-        abs_quantity = abs(quantity)
-        entry_price = float(position["avg_price"])
-        side = "LONG" if quantity > 0 else "SHORT"
-        exit_transaction_type = "SELL" if side == "LONG" else "BUY"
-        tick_size = float(position.get("tick_size") or 0.05)
-        instrument_token = int(position["instrument_token"])
+        try:
+            tradingsymbol = position["tradingsymbol"]
+            exchange = position.get("exchange") or "NFO"
+            quantity = int(position["quantity"])
+            abs_quantity = abs(quantity)
+            entry_price = float(position["avg_price"])
+            side = "LONG" if quantity > 0 else "SHORT"
+            exit_transaction_type = "SELL" if side == "LONG" else "BUY"
+            tick_size = float(position.get("tick_size") or 0.05)
+            instrument_token = int(position["instrument_token"])
 
-        candles = get_completed_daily_candles(market_data_kite, instrument_token, config)
+            candles = get_completed_daily_candles(market_data_kite, instrument_token, config)
 
-        key = (tradingsymbol, exchange, exit_transaction_type, abs_quantity, config.product)
-        existing_gtt = existing_gtt_map.get(key)
+            key = (tradingsymbol, exchange, exit_transaction_type, abs_quantity, config.product)
+            existing_gtt = existing_gtt_map.get(key)
 
-        previous_trigger_price = None
-        if existing_gtt:
-            previous_trigger_price = extract_existing_trigger_price(existing_gtt)
+            previous_trigger_price = None
+            if existing_gtt:
+                previous_trigger_price = extract_existing_trigger_price(existing_gtt)
 
-        now = datetime.now()
+            now = datetime.now()
 
-        # MARKET HOURS → DO NOT RECOMPUTE
-        if now.hour < 15 or (now.hour == 15 and now.minute < 30):
-            if previous_trigger_price is not None:
-                trigger_price = float(previous_trigger_price)
-                current_price_reference = float(candles[-1]["close"])
+            # MARKET HOURS → DO NOT RECOMPUTE
+            if now.hour < 15 or (now.hour == 15 and now.minute < 30):
+                if previous_trigger_price is not None:
+                    trigger_price = float(previous_trigger_price)
+                    current_price_reference = float(candles[-1]["close"])
 
-                order = prepare_limit_order_from_trigger(
-                    side=side,
-                    trigger_price=trigger_price,
-                    tick_size=tick_size,
-                    current_price_reference=current_price_reference,
-                )
+                    order = prepare_limit_order_from_trigger(
+                        side=side,
+                        trigger_price=trigger_price,
+                        tick_size=tick_size,
+                        current_price_reference=current_price_reference,
+                    )
 
-                if side == "LONG":
-                    per_unit_risk = max(0.0, entry_price - trigger_price)
-                else:
-                    per_unit_risk = max(0.0, trigger_price - entry_price)
+                    if side == "LONG":
+                        per_unit_risk = max(0.0, entry_price - trigger_price)
+                    else:
+                        per_unit_risk = max(0.0, trigger_price - entry_price)
 
-                total_risk = per_unit_risk * abs_quantity
+                    total_risk = per_unit_risk * abs_quantity
 
-                plans.append(
-                    {
-                        "user_id": user_id,
-                        "contract_type": contract_type,
-                        "symbol_filter": symbol,
-                        "tradingsymbol": tradingsymbol,
-                        "exchange": exchange,
-                        "position_side": side,
-                        "exit_transaction_type": exit_transaction_type,
-                        "quantity": abs_quantity,
-                        "product": config.product,
-                        "entry_price": entry_price,
-                        "tick_size": tick_size,
-                        "trigger_price": trigger_price,
-                        "limit_price": float(order["limit_price"]),
-                        "current_price_reference": current_price_reference,
-                        "per_unit_risk": round(per_unit_risk, 2),
-                        "total_risk": round(total_risk, 2),
-                        "details": {"mode": "FROZEN_INTRADAY"},
-                    }
-                )
+                    plans.append(
+                        {
+                            "user_id": user_id,
+                            "contract_type": contract_type,
+                            "symbol_filter": symbol,
+                            "tradingsymbol": tradingsymbol,
+                            "exchange": exchange,
+                            "position_side": side,
+                            "exit_transaction_type": exit_transaction_type,
+                            "quantity": abs_quantity,
+                            "product": config.product,
+                            "entry_price": entry_price,
+                            "tick_size": tick_size,
+                            "trigger_price": trigger_price,
+                            "limit_price": float(order["limit_price"]),
+                            "current_price_reference": current_price_reference,
+                            "per_unit_risk": round(per_unit_risk, 2),
+                            "total_risk": round(total_risk, 2),
+                            "details": {"mode": "FROZEN_INTRADAY"},
+                        }
+                    )
 
-                continue
+                    continue
 
-        stop = compute_deterministic_stop_eod(
-            candles=candles,
-            side=side,
-            tick_size=tick_size,
-            entry_price=entry_price,
-            previous_trigger_price=previous_trigger_price,
-            config=config.computation,
-        )
 
-        order = prepare_limit_order_from_trigger(
-            side=side,
-            trigger_price=float(stop["trigger_price"]),
-            tick_size=tick_size,
-            current_price_reference=float(stop["current_price_reference"]),
-        )
 
-        if side == "LONG":
-            per_unit_risk = max(0.0, entry_price - float(stop["trigger_price"]))
-        else:
-            per_unit_risk = max(0.0, float(stop["trigger_price"]) - entry_price)
 
-        total_risk = per_unit_risk * abs_quantity
 
-        plans.append(
-            {
-                "user_id": user_id,
-                "contract_type": contract_type,
-                "symbol_filter": symbol,
-                "tradingsymbol": tradingsymbol,
-                "exchange": exchange,
-                "position_side": side,
-                "exit_transaction_type": exit_transaction_type,
-                "quantity": abs_quantity,
-                "product": config.product,
-                "entry_price": entry_price,
-                "tick_size": tick_size,
-                "trigger_price": float(stop["trigger_price"]),
-                "limit_price": float(order["limit_price"]),
-                "current_price_reference": float(stop["current_price_reference"]),
-                "per_unit_risk": round(per_unit_risk, 2),
-                "total_risk": round(total_risk, 2),
-                "details": stop,
-            }
-        )
+            stop = compute_deterministic_stop_eod(
+                candles=candles,
+                side=side,
+                tick_size=tick_size,
+                entry_price=entry_price,
+                previous_trigger_price=previous_trigger_price,
+                config=config.computation,
+            )
+
+            order = prepare_limit_order_from_trigger(
+                side=side,
+                trigger_price=float(stop["trigger_price"]),
+                tick_size=tick_size,
+                current_price_reference=float(stop["current_price_reference"]),
+            )
+
+            if side == "LONG":
+                per_unit_risk = max(0.0, entry_price - float(stop["trigger_price"]))
+            else:
+                per_unit_risk = max(0.0, float(stop["trigger_price"]) - entry_price)
+
+            total_risk = per_unit_risk * abs_quantity
+
+            plans.append(
+                {
+                    "user_id": user_id,
+                    "contract_type": contract_type,
+                    "symbol_filter": symbol,
+                    "tradingsymbol": tradingsymbol,
+                    "exchange": exchange,
+                    "position_side": side,
+                    "exit_transaction_type": exit_transaction_type,
+                    "quantity": abs_quantity,
+                    "product": config.product,
+                    "entry_price": entry_price,
+                    "tick_size": tick_size,
+                    "trigger_price": float(stop["trigger_price"]),
+                    "limit_price": float(order["limit_price"]),
+                    "current_price_reference": float(stop["current_price_reference"]),
+                    "per_unit_risk": round(per_unit_risk, 2),
+                    "total_risk": round(total_risk, 2),
+                    "details": stop,
+                }
+            )
+        except Exception as exc:
+            logger.exception(
+                "[SKIP] %s | reason=%s: %s",
+                position.get("tradingsymbol", "UNKNOWN"),
+                type(exc).__name__,
+                exc,
+            )
+            continue
 
     return plans
 
@@ -415,8 +439,29 @@ def main() -> int:
                 f"{details.get('atr_average', 0.0):.2f}" if details.get("atr_average") is not None else "-",
                 f"{details.get('multiplier', 0.0):.2f}" if details.get("multiplier") is not None else "-",
                 f"{details.get('raw_stop', 0.0):.2f}" if details.get("raw_stop") is not None else "-",
+                details.get("final_source", "-"),
+                details.get("stop_mode", "-"),
+                f"{details.get('profit', 0.0):.2f}" if details.get("profit") is not None else "-",
+                f"{details.get('min_distance', 0.0):.2f}" if details.get("min_distance") is not None else "-",
+                details.get("min_rule", "-"),
+                "YES" if details.get("min_distance_satisfied") else "NO",
             ])
 
+        headers = [
+            "Action", "Trigger ID", "Status", "Tradingsymbol", "Month", "Side", "Exit",
+            "Qty", "Entry", "Close Ref", "Trigger", "Limit", "Risk/Unit",
+            "Dist to Stop", "Total Risk", "Old Trigger", "Old Limit", "Update?",
+            "ATR", "ATR Avg", "Mult", "Raw Stop", "Final Source",
+            "Stop Mode", "Profit", "Min Dist", "Min Rule", "Min OK?",
+        ]
+
+        csv_file = f"stop_orchestrator_{user_id}_{contract_type}.csv"
+        with open(csv_file, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(headers)
+            writer.writerows(rows)
+
+        print(f"CSV written: {csv_file}")
         print("STOP ORCHESTRATOR")
         print_table(
             headers=[
@@ -442,6 +487,12 @@ def main() -> int:
                 "ATR Avg",
                 "Mult",
                 "Raw Stop",
+                "Final Source",
+                "Stop Mode",
+                "Profit",
+                "Min Dist",
+                "Min Rule",
+                "Min OK?",
             ],
             rows=rows,
         )

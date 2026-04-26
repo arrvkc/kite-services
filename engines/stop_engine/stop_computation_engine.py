@@ -13,8 +13,8 @@ class StopComputationConfig:
     volatility_spike_ratio: float = 2.0
     volatility_spike_multiplier_value: float = 3.25
     swing_lookback: int = 5
-    min_distance_pct: float = 0.005
-    min_distance_atr_multiple: float = 0.5
+    min_distance_pct: float = 0.01
+    min_distance_atr_multiple: float = 1.0
     material_change_pct: float = 0.0005
     material_change_tick_multiple: float = 2.0
 
@@ -148,48 +148,139 @@ def compute_deterministic_stop_eod(
     recent = candles[-config.swing_lookback:]
     swing_low = min(float(c["low"]) for c in recent)
     swing_high = max(float(c["high"]) for c in recent)
-    min_distance = compute_min_distance(current_price_reference, atr, config)
+    if side == "LONG":
+        profit = current_price_reference - entry_price
+    else:
+        profit = entry_price - current_price_reference
+
+    if profit <= 0:
+        min_distance_pct = 0.01
+        min_distance_atr_multiple = 1.25
+        stop_mode = "LOSS"
+
+    elif profit < 1.5 * atr:
+        min_distance_pct = 0.0075
+        min_distance_atr_multiple = 1.0
+        stop_mode = "EARLY_PROFIT"
+
+    else:
+        min_distance_pct = 0.005
+        min_distance_atr_multiple = 0.75
+        stop_mode = "PROFIT"
+
+    min_distance = max(
+        current_price_reference * min_distance_pct,
+        atr * min_distance_atr_multiple,
+    )
 
     if side == "LONG":
         initial_stop = entry_price - (atr * multiplier)
-        trailing_candidate = max(swing_low, current_price_reference - (atr * multiplier))
-        raw_stop = max(initial_stop, trailing_candidate) if previous_trigger_price is None else max(previous_trigger_price, trailing_candidate)
-        validated_stop = min(raw_stop, current_price_reference - min_distance)
-        validated_stop = floor_to_tick(validated_stop, tick_size)
+
+        atr_based = current_price_reference - (atr * multiplier)
+        structure_based = swing_low
+        trailing_candidate = max(structure_based, atr_based)
+        trailing_source = "STRUCTURE" if structure_based >= atr_based else "ATR"
+
+        raw_stop = (
+            max(initial_stop, trailing_candidate)
+            if previous_trigger_price is None
+            else max(previous_trigger_price, trailing_candidate)
+        )
+
+        # First adjust to satisfy minimum distance
+        distance_valid_stop = floor_to_tick(current_price_reference - min_distance, tick_size)
+        validated_stop = min(raw_stop, distance_valid_stop)
+
+        if stop_mode == "EARLY_PROFIT" and validated_stop < entry_price:
+            min_distance_pct = 0.01
+            min_distance_atr_multiple = 1.25
+            stop_mode = "EARLY_PROFIT_FALLBACK_LOSS"
+
+            min_distance = max(
+                current_price_reference * min_distance_pct,
+                atr * min_distance_atr_multiple,
+            )
+
+            distance_valid_stop = floor_to_tick(current_price_reference - min_distance, tick_size)
+            validated_stop = min(raw_stop, distance_valid_stop)
+
+        # Then enforce monotonicity
+        adjustment_blocked_by_monotonicity = False
         if previous_trigger_price is not None:
             previous_trigger_floor = floor_to_tick(previous_trigger_price, tick_size)
             if validated_stop < previous_trigger_floor:
-                raise ValueError(
-                    f"Monotonicity violation (LONG): computed stop {validated_stop} is below previous stop {previous_trigger_floor}"
-                )
+                validated_stop = previous_trigger_floor
+                adjustment_blocked_by_monotonicity = True
             validated_stop = max(validated_stop, previous_trigger_floor)
+
         if validated_stop >= current_price_reference:
             validated_stop = floor_to_tick(current_price_reference - min_distance, tick_size)
+
         trigger_price = validated_stop
+
+
     else:
+
         initial_stop = entry_price + (atr * multiplier)
-        trailing_candidate = min(swing_high, current_price_reference + (atr * multiplier))
-        raw_stop = min(initial_stop, trailing_candidate) if previous_trigger_price is None else min(previous_trigger_price, trailing_candidate)
-        validated_stop = max(raw_stop, current_price_reference + min_distance)
-        validated_stop = ceil_to_tick(validated_stop, tick_size)
+
+        atr_based = current_price_reference + (atr * multiplier)
+
+        structure_based = swing_high
+
+        trailing_candidate = min(structure_based, atr_based)
+
+        trailing_source = "STRUCTURE" if structure_based <= atr_based else "ATR"
+
+        raw_stop = (
+
+            min(initial_stop, trailing_candidate)
+
+            if previous_trigger_price is None
+
+            else min(previous_trigger_price, trailing_candidate)
+
+        )
+
+        # First adjust to satisfy minimum distance
+
+        distance_valid_stop = ceil_to_tick(current_price_reference + min_distance, tick_size)
+
+        validated_stop = max(raw_stop, distance_valid_stop)
+
+        if stop_mode == "EARLY_PROFIT" and validated_stop > entry_price:
+            min_distance_pct = 0.01
+            min_distance_atr_multiple = 1.25
+            stop_mode = "EARLY_PROFIT_FALLBACK_LOSS"
+
+            min_distance = max(
+                current_price_reference * min_distance_pct,
+                atr * min_distance_atr_multiple,
+            )
+
+            distance_valid_stop = ceil_to_tick(current_price_reference + min_distance, tick_size)
+            validated_stop = max(raw_stop, distance_valid_stop)
+
+        # Then enforce monotonicity
+
+        adjustment_blocked_by_monotonicity = False
+
         if previous_trigger_price is not None:
+
             previous_trigger_ceil = ceil_to_tick(previous_trigger_price, tick_size)
+
             if validated_stop > previous_trigger_ceil:
-                raise ValueError(
-                    f"Monotonicity violation (SHORT): computed stop {validated_stop} is above previous stop {previous_trigger_ceil}"
-                )
+                validated_stop = previous_trigger_ceil
+
+                adjustment_blocked_by_monotonicity = True
+
             validated_stop = min(validated_stop, previous_trigger_ceil)
+
         if validated_stop <= current_price_reference:
             validated_stop = ceil_to_tick(current_price_reference + min_distance, tick_size)
+
         trigger_price = validated_stop
-
-    # MIN DISTANCE VALIDATION (HARD CHECK)
     distance = abs(current_price_reference - trigger_price)
-
-    if distance < min_distance:
-        raise ValueError(
-            f"Min distance violation: distance={distance:.4f}, required={min_distance:.4f}"
-        )
+    min_distance_satisfied = distance >= min_distance
 
     update_required = material_change_required(
         old_trigger=previous_trigger_price,
@@ -198,6 +289,17 @@ def compute_deterministic_stop_eod(
         tick_size=tick_size,
         config=config,
     )
+
+    if adjustment_blocked_by_monotonicity:
+        final_source = "MONOTONICITY"
+    elif stop_mode == "EARLY_PROFIT_FALLBACK_LOSS":
+        final_source = "FALLBACK_LOSS_DISTANCE"
+    elif trigger_price != raw_stop:
+        final_source = "MIN_DISTANCE"
+    elif trailing_source == "ATR":
+        final_source = f"{multiplier:.2f}x_ATR"
+    else:
+        final_source = "SWING_LOW" if side == "LONG" else "SWING_HIGH"
 
     return {
         "side": side,
@@ -210,12 +312,20 @@ def compute_deterministic_stop_eod(
         "swing_high": round(swing_high, 4),
         "initial_stop": round(initial_stop, 4),
         "trailing_candidate": round(trailing_candidate, 4),
+        "trailing_source": trailing_source,
         "previous_trigger_price": round(previous_trigger_price, 4) if previous_trigger_price is not None else None,
         "raw_stop": round(raw_stop, 4),
         "min_distance": round(min_distance, 4),
         "validated_stop": round(validated_stop, 8),
         "trigger_price": round(trigger_price, 8),
         "update_required": update_required,
+        "distance": round(distance, 8),
+        "min_distance_satisfied": min_distance_satisfied,
+        "adjustment_blocked_by_monotonicity": adjustment_blocked_by_monotonicity,
+        "final_source": final_source,
+        "profit": round(profit, 4),
+        "stop_mode": stop_mode,
+        "min_rule": f"max({min_distance_pct * 100:.2f}%, {min_distance_atr_multiple:.2f} ATR)",
     }
 
 

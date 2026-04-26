@@ -1,0 +1,40 @@
+{
+  "instrument": "SBIN",
+  "asof_time": "2026-04-19T15:30:00+05:30",
+  "label": "UP",
+  "confidence": 0.74,
+  "aggregate_score": 48.0,
+  "internal_state": "CLASSIFIABLE",
+  "trend_history_w5": [
+    {
+      "label": "UP",
+      "confidence": 0.71,
+      "aggregate_score": 42.0
+    },
+    {
+      "label": "UP",
+      "confidence": 0.68,
+      "aggregate_score": 39.0
+    },
+    {
+      "label": "FLAT",
+      "confidence": 0.52,
+      "aggregate_score": 12.0
+    },
+    {
+      "label": "UP",
+      "confidence": 0.73,
+      "aggregate_score": 44.0
+    },
+    {
+      "label": "UP",
+      "confidence": 0.74,
+      "aggregate_score": 48.0
+    }
+  ],
+  "dte_near_month": 8,
+  "next_month_available": true,
+  "dte_next_month": 29,
+  "in_universe": true,
+  "prior_committed_state": null
+}
