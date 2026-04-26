@@ -23,6 +23,8 @@ from engines.stop_engine.stop_execution_engine import (
     execute_stoploss_plans,
 )
 from engines.stop_engine.stop_execution_engine import get_existing_active_gtt_map, extract_existing_trigger_price
+from engines.stop_engine.persistence.db import get_stop_db_session
+from engines.stop_engine.persistence.stop_persistence_service import StopPersistenceService
 
 logger = logging.getLogger(__name__)
 VALID_CONTRACT_TYPES = {"near", "next", "far"}
@@ -199,6 +201,32 @@ def build_execution_plans(
             previous_trigger_price = None
             if existing_gtt:
                 previous_trigger_price = extract_existing_trigger_price(existing_gtt)
+            persisted_stop_state = None
+
+            try:
+                with get_stop_db_session() as session:
+                    persistence = StopPersistenceService(session)
+
+                    lifecycle = persistence.get_open_lifecycle(
+                        account_id=user_id,
+                        tradingsymbol=tradingsymbol,
+                        side=side,
+                    )
+
+                    if lifecycle:
+                        persisted_stop_state = persistence.get_latest_stop_state(
+                            lifecycle_id=lifecycle.id
+                        )
+
+            except Exception as e:
+                logger.warning(
+                    "[PERSISTENCE UNAVAILABLE] %s | %s",
+                    tradingsymbol,
+                    str(e),
+                )
+
+            if previous_trigger_price is None and persisted_stop_state is not None:
+                previous_trigger_price = float(persisted_stop_state.current_stop)
 
             now = datetime.now()
 
