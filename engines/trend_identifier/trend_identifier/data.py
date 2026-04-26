@@ -99,13 +99,8 @@ def _calendar_adjust(
                 tz=df.index.tz,
             )
     else:
-        normalized_freq = _normalize_pandas_freq(freq)
-        full_index = pd.date_range(
-            start=df.index.min(),
-            end=df.index.max(),
-            freq=normalized_freq,
-            tz=df.index.tz,
-        )
+        # Futures: do NOT force calendar expansion
+        return df.copy(), False
 
     adjusted = df.reindex(full_index)
     missing_adjusted = adjusted.isna().any(axis=1).any()

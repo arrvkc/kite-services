@@ -42,6 +42,16 @@ class EquityTrendRunner:
             self._instrument_cache = df
         return self._instrument_cache.copy()
 
+    def _get_nse_equity_symbols(self) -> set[str]:
+        df = self._get_instruments()
+        if "instrument_type" in df.columns:
+            eq = df[df["instrument_type"].fillna("").astype(str).str.upper() == "EQ"].copy()
+        else:
+            eq = df.copy()
+        if "tradingsymbol" not in eq.columns:
+            raise RuntimeError("NSE instruments missing tradingsymbol")
+        return set(eq["tradingsymbol"].astype(str).str.upper().tolist())
+
     def resolve_equity_instrument(self, symbol: str) -> InstrumentMatch:
         df = self._get_instruments()
         symbol_upper = symbol.upper()
@@ -75,6 +85,41 @@ class EquityTrendRunner:
             instrument_type=str(row.get("instrument_type", "") or ""),
         )
 
+    def resolve_futures_instrument(self, symbol: str, asof_time: Any) -> InstrumentMatch:
+        df = pd.DataFrame(self.kite.instruments("NFO"))
+        symbol_upper = symbol.upper()
+
+        asof_date = pd.Timestamp(asof_time).date()
+
+        fut = df[
+            (df["instrument_type"].fillna("").astype(str).str.upper() == "FUT") &
+            (df["name"].fillna("").astype(str).str.upper() == symbol_upper)
+            ].copy()
+
+        if fut.empty:
+            raise RuntimeError(f"No NFO futures found for {symbol_upper}")
+
+        fut["expiry"] = pd.to_datetime(fut["expiry"]).dt.date
+
+        fut = fut[fut["expiry"] >= asof_date].copy()
+
+        if fut.empty:
+            raise RuntimeError(
+                f"No active or future NFO futures found for {symbol_upper} as of {asof_date}"
+            )
+
+        fut = fut.sort_values("expiry")
+        row = fut.iloc[0]  # nearest valid contract
+
+        return InstrumentMatch(
+            instrument_token=int(row["instrument_token"]),
+            exchange=str(row["exchange"]),
+            tradingsymbol=str(row["tradingsymbol"]),
+            name=str(row.get("name", "") or ""),
+            segment=str(row.get("segment", "") or ""),
+            instrument_type=str(row.get("instrument_type", "") or ""),
+        )
+
     @staticmethod
     def normalize_candles(candles: List[Dict[str, Any]]) -> pd.DataFrame:
         if not candles:
@@ -92,7 +137,12 @@ class EquityTrendRunner:
         for col in ["open", "high", "low", "close", "volume"]:
             df[col] = pd.to_numeric(df[col], errors="raise")
 
-        return df[REQUIRED_COLUMNS].sort_values("timestamp").reset_index(drop=True)
+        columns = list(REQUIRED_COLUMNS)
+        if "oi" in df.columns:
+            df["oi"] = pd.to_numeric(df["oi"], errors="raise")
+            columns.append("oi")
+
+        return df[columns].sort_values("timestamp").reset_index(drop=True)
 
     def fetch_historical_data(
         self,
@@ -151,17 +201,31 @@ class EquityTrendRunner:
         daily_lookback_days: int = 900,
         hourly_lookback_days: int = 120,
     ) -> tuple[Dict[str, pd.DataFrame], Dict[str, Any]]:
-        instrument = self.resolve_equity_instrument(symbol)
+        symbol_upper = symbol.upper()
+        if symbol_upper in self._get_nse_equity_symbols():
+            instrument = self.resolve_equity_instrument(symbol_upper)
+        else:
+            instrument = self.resolve_futures_instrument(symbol_upper, asof_time)
         asof_dt = self._normalize_asof_time(asof_time)
 
-        daily_df = self.fetch_historical_data(
-            instrument_token=instrument.instrument_token,
-            from_dt=asof_dt - timedelta(days=daily_lookback_days),
-            to_dt=asof_dt + timedelta(days=1),
-            interval="day",
-            oi=False,
-            continuous=False,
-        )
+        if instrument.exchange == "NFO":
+            daily_df = self.fetch_historical_data(
+                instrument_token=instrument.instrument_token,
+                from_dt=asof_dt - timedelta(days=daily_lookback_days),
+                to_dt=asof_dt + timedelta(days=1),
+                interval="day",
+                oi=True,
+                continuous=True,
+            )
+        else:
+            daily_df = self.fetch_historical_data(
+                instrument_token=instrument.instrument_token,
+                from_dt=asof_dt - timedelta(days=daily_lookback_days),
+                to_dt=asof_dt + timedelta(days=1),
+                interval="day",
+                oi=False,
+                continuous=False,
+            )
         daily_df = daily_df.loc[daily_df["timestamp"] <= pd.Timestamp(asof_dt)].reset_index(drop=True)
 
         hourly_df = self.fetch_historical_data(
@@ -183,7 +247,7 @@ class EquityTrendRunner:
         }
 
         instrument_metadata = {
-            "instrument_type": "equity",
+            "instrument_type": instrument.instrument_type,
             "hourly_freq": "h",
             "resolved_exchange": instrument.exchange,
             "resolved_tradingsymbol": instrument.tradingsymbol,
@@ -191,6 +255,12 @@ class EquityTrendRunner:
             "instrument_token": instrument.instrument_token,
             "segment": instrument.segment,
             "kite_instrument_type": instrument.instrument_type,
+            "front_contract_volume_series": (
+                (hourly_df["close"] * hourly_df["volume"])
+                if {"close", "volume"}.issubset(hourly_df.columns)
+                else None
+            ),
+            "front_contract_oi_series": hourly_df["oi"] if "oi" in hourly_df.columns else None,
         }
 
         return raw_bars, instrument_metadata
@@ -230,7 +300,7 @@ class EquityTrendRunner:
         payload = evaluate_trend(
             instrument=symbol.upper(),
             asof_time=asof_time,
-            calendar=self.exchange,
+            calendar=instrument_metadata["resolved_exchange"],
             raw_bars=raw_bars,
             instrument_metadata=instrument_metadata,
         )
@@ -264,7 +334,7 @@ class EquityTrendRunner:
         payload = evaluate_trend(
             instrument=symbol.upper(),
             asof_time=asof_time,
-            calendar=self.exchange,
+            calendar=instrument_metadata["resolved_exchange"],
             raw_bars=raw_bars,
             instrument_metadata=instrument_metadata,
         )

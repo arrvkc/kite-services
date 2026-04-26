@@ -50,7 +50,18 @@ def passes_eligibility_gate(aligned: AlignedData) -> GateResult:
         reasons.append(ReasonCode.GATE_HISTORY_WEEKLY.value)
     if len(aligned.daily.bars) < CONSTANTS.daily_bars_required:
         reasons.append(ReasonCode.GATE_HISTORY_DAILY.value)
-    if len(aligned.hourly.bars) < CONSTANTS.hourly_bars_required:
+    hourly_required = CONSTANTS.hourly_bars_required
+
+    if aligned.instrument_type == "FUT" and str(aligned.metadata.get("resolved_name", "")).upper() in {
+        "NIFTY",
+        "BANKNIFTY",
+        "FINNIFTY",
+        "MIDCPNIFTY",
+        "NIFTYNXT50",
+    }:
+        hourly_required = 200
+
+    if len(aligned.hourly.bars) < hourly_required:
         reasons.append(ReasonCode.GATE_HISTORY_HOURLY.value)
 
     if _missing_ratio(aligned.daily.adjusted_bars, CONSTANTS.daily_missing_window) > CONSTANTS.daily_missing_tolerance:
@@ -80,14 +91,17 @@ def passes_eligibility_gate(aligned: AlignedData) -> GateResult:
         vol_series = aligned.front_contract_volume_series
         oi_series = aligned.front_contract_oi_series
         threshold = float(aligned.metadata.get("futures_notional_volume_threshold", CONSTANTS.futures_notional_volume_threshold_default))
-        if vol_series is None or oi_series is None:
+        if vol_series is None:
             reasons.append(ReasonCode.GATE_LIQUIDITY.value)
         else:
             median_notional = float(vol_series.tail(20).median()) if len(vol_series) >= 20 else 0.0
-            oi_minimum = float(aligned.metadata.get("venue_min_open_interest", 1.0))
-            current_oi = float(oi_series.iloc[-1]) if len(oi_series) else 0.0
-            if median_notional < threshold or current_oi < oi_minimum:
+            if median_notional < threshold:
                 reasons.append(ReasonCode.GATE_LIQUIDITY.value)
+            elif oi_series is not None:
+                oi_minimum = float(aligned.metadata.get("venue_min_open_interest", 1.0))
+                current_oi = float(oi_series.iloc[-1]) if len(oi_series) else 0.0
+                if current_oi < oi_minimum:
+                    reasons.append(ReasonCode.GATE_LIQUIDITY.value)
 
     passed = len(reasons) == 0
     if not passed:
