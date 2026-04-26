@@ -404,7 +404,10 @@ def persist_stop_results(user_id: str, results: List[Dict], dry_run: bool) -> No
 
                 latest_state = persistence.get_latest_stop_state(lifecycle_id=lifecycle.id)
 
-                if latest_state is not None and latest_state.last_applied_hash == hash_value:
+                same_hash = latest_state is not None and latest_state.last_applied_hash == hash_value
+                latest_was_simulated = latest_state is not None and latest_state.broker_order_status == "SIMULATED"
+
+                if same_hash and (dry_run or not latest_was_simulated):
                     continue
 
                 persistence.insert_stop_event(
@@ -431,7 +434,7 @@ def persist_stop_results(user_id: str, results: List[Dict], dry_run: bool) -> No
                     reason=item.get("status"),
                 )
 
-                if item.get("status") in ("SIMULATED", "SUCCESS") and item.get("action") in ("PLACE", "MODIFY", "UNCHANGED"):
+                if item.get("status") in ("SIMULATED", "SUCCESS") and item.get("action") in ("PLACE", "PLACED", "MODIFY", "MODIFIED", "UNCHANGED"):
                     persistence.upsert_stop_state(
                         lifecycle_id=lifecycle.id,
                         current_stop=plan["trigger_price"],
