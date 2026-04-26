@@ -201,7 +201,7 @@ def build_execution_plans(
             previous_trigger_price = None
             if existing_gtt:
                 previous_trigger_price = extract_existing_trigger_price(existing_gtt)
-            persisted_stop_state = None
+            persisted_trigger_price = None
 
             try:
                 with get_stop_db_session() as session:
@@ -217,6 +217,8 @@ def build_execution_plans(
                         persisted_stop_state = persistence.get_latest_stop_state(
                             lifecycle_id=lifecycle.id
                         )
+                        if persisted_stop_state is not None:
+                            persisted_trigger_price = float(persisted_stop_state.current_stop)
 
             except Exception as e:
                 logger.warning(
@@ -225,8 +227,8 @@ def build_execution_plans(
                     str(e),
                 )
 
-            if previous_trigger_price is None and persisted_stop_state is not None:
-                previous_trigger_price = float(persisted_stop_state.current_stop)
+            if previous_trigger_price is None and persisted_trigger_price is not None:
+                previous_trigger_price = persisted_trigger_price
 
             now = datetime.now()
 
@@ -364,6 +366,89 @@ def run_stop_orchestrator(
     )
 
 
+def persist_stop_results(user_id: str, results: List[Dict], dry_run: bool) -> None:
+    try:
+        with get_stop_db_session() as session:
+            persistence = StopPersistenceService(session)
+
+            for item in results:
+                plan = item["plan"]
+                details = plan.get("details", {})
+
+                lifecycle = persistence.get_open_lifecycle(
+                    account_id=user_id,
+                    tradingsymbol=plan["tradingsymbol"],
+                    side=plan["position_side"],
+                )
+
+                if lifecycle is None:
+                    lifecycle = persistence.create_lifecycle(
+                        account_id=user_id,
+                        exchange=plan["exchange"],
+                        tradingsymbol=plan["tradingsymbol"],
+                        instrument_token=None,
+                        side=plan["position_side"],
+                        entry_qty=plan["quantity"],
+                        open_qty=plan["quantity"],
+                        entry_price=plan["entry_price"],
+                    )
+
+                hash_value = persistence.build_hash(
+                    account_id=user_id,
+                    tradingsymbol=plan["tradingsymbol"],
+                    side=plan["position_side"],
+                    quantity=plan["quantity"],
+                    trigger_price=plan["trigger_price"],
+                    limit_price=plan["limit_price"],
+                )
+
+                latest_state = persistence.get_latest_stop_state(lifecycle_id=lifecycle.id)
+
+                if latest_state is not None and latest_state.last_applied_hash == hash_value:
+                    continue
+
+                persistence.insert_stop_event(
+                    lifecycle_id=lifecycle.id,
+                    event_type="DRY_RUN" if dry_run else item["action"],
+                    old_stop=plan.get("existing_trigger_price"),
+                    raw_stop=details.get("raw_stop"),
+                    validated_stop=details.get("validated_stop"),
+                    final_stop=plan["trigger_price"],
+                    trigger_price=plan["trigger_price"],
+                    limit_price=plan["limit_price"],
+                    quantity=plan["quantity"],
+                    entry_price=plan["entry_price"],
+                    close_ref=plan["current_price_reference"],
+                    atr=details.get("atr"),
+                    atr_avg=details.get("atr_average"),
+                    multiplier=details.get("multiplier"),
+                    swing_low=details.get("swing_low"),
+                    swing_high=details.get("swing_high"),
+                    source=details.get("final_source"),
+                    action_taken=item["action"],
+                    broker_trigger_id=str(item.get("trigger_id")) if item.get("trigger_id") else None,
+                    hash_value=hash_value,
+                    reason=item.get("status"),
+                )
+
+                if item.get("status") in ("SIMULATED", "SUCCESS") and item.get("action") in ("PLACE", "MODIFY", "UNCHANGED"):
+                    persistence.upsert_stop_state(
+                        lifecycle_id=lifecycle.id,
+                        current_stop=plan["trigger_price"],
+                        trigger_price=plan["trigger_price"],
+                        limit_price=plan["limit_price"],
+                        quantity=plan["quantity"],
+                        stop_type="INITIAL" if details.get("stop_mode") in (None, "-", "") else "TRAILING",
+                        last_applied_hash=hash_value,
+                        broker_trigger_id=str(item.get("trigger_id")) if item.get("trigger_id") else None,
+                        broker_order_status=item.get("status"),
+                        source=details.get("final_source"),
+                    )
+
+    except Exception as exc:
+        logger.warning("[PERSISTENCE WRITE FAILED] %s", exc)
+
+
 def print_table(headers: List[str], rows: List[List[str]]) -> None:
     widths = [len(str(h)) for h in headers]
     for row in rows:
@@ -432,6 +517,11 @@ def main() -> int:
             print(result.get("message", "No results."))
             return 0
 
+        persist_stop_results(
+            user_id=user_id,
+            results=result["results"],
+            dry_run=dry_run,
+        )
         rows = []
         for item in result["results"]:
             plan = item["plan"]
