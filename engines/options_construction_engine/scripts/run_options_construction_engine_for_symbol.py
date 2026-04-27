@@ -410,24 +410,8 @@ def _candidate_table_row(
     result = wrapped_output["construction_result"]
     legs = candidate.get("legs") or []
 
-    if len(legs) < 2:
-        spread = "-"
-        width = None
-    else:
-        short_leg = next((leg for leg in legs if leg.get("role") == "SHORT_LEG"), legs[0])
-        long_leg = next((leg for leg in legs if leg.get("role") == "LONG_LEG"), legs[1])
-
-        short_strike = float(short_leg["strike"])
-        long_strike = float(long_leg["strike"])
-        width = abs(long_strike - short_strike)
-
-        short_display = int(short_strike) if short_strike.is_integer() else short_strike
-        long_display = int(long_strike) if long_strike.is_integer() else long_strike
-
-        spread = (
-            f"S {short_display}{short_leg['option_type']} "
-            f"/ B {long_display}{long_leg['option_type']}"
-        )
+    temp_result = {"legs": legs}
+    spread, width = _spread_and_width(temp_result)
 
     econ = candidate.get("economics") or {}
     net_premium = econ.get("net_premium")
