@@ -286,10 +286,33 @@ def _pct(value: Any) -> str:
         return str(value)
 
 
+def _display_strike(value: Any) -> str:
+    strike = float(value)
+    return str(int(strike)) if strike.is_integer() else str(strike)
+
+
 def _spread_and_width(result: dict[str, Any]) -> tuple[str, float | None]:
     legs = result.get("legs") or []
     if len(legs) < 2:
         return "-", None
+
+    # Iron Condor: show both PE side and CE side.
+    role_map = {leg.get("role"): leg for leg in legs}
+    if {"PUT_LONG_WING", "PUT_SHORT", "CALL_SHORT", "CALL_LONG_WING"}.issubset(role_map):
+        pl = role_map["PUT_LONG_WING"]
+        ps = role_map["PUT_SHORT"]
+        cs = role_map["CALL_SHORT"]
+        cl = role_map["CALL_LONG_WING"]
+
+        put_width = abs(float(ps["strike"]) - float(pl["strike"]))
+        call_width = abs(float(cl["strike"]) - float(cs["strike"]))
+        width = max(put_width, call_width)
+
+        spread = (
+            f"B {_display_strike(pl['strike'])}PE/S {_display_strike(ps['strike'])}PE "
+            f"+ S {_display_strike(cs['strike'])}CE/B {_display_strike(cl['strike'])}CE"
+        )
+        return spread, width
 
     short_leg = next((leg for leg in legs if leg.get("role") == "SHORT_LEG"), legs[0])
     long_leg = next((leg for leg in legs if leg.get("role") == "LONG_LEG"), legs[1])
@@ -298,12 +321,9 @@ def _spread_and_width(result: dict[str, Any]) -> tuple[str, float | None]:
     long_strike = float(long_leg["strike"])
     width = abs(long_strike - short_strike)
 
-    short_display = int(short_strike) if short_strike.is_integer() else short_strike
-    long_display = int(long_strike) if long_strike.is_integer() else long_strike
-
     spread = (
-        f"S {short_display}{short_leg['option_type']} "
-        f"/ B {long_display}{long_leg['option_type']}"
+        f"S {_display_strike(short_strike)}{short_leg['option_type']} "
+        f"/ B {_display_strike(long_strike)}{long_leg['option_type']}"
     )
     return spread, width
 
