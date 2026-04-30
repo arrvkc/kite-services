@@ -250,14 +250,12 @@ def _build_strategy_result_from_symbol(kite: Any, symbol: str) -> dict[str, Any]
 
     strike_steps = [b - a for a, b in zip(strikes, strikes[1:]) if b > a]
     strike_step = min(strike_steps)
-    lot_size = int(opts[0]["lot_size"])
 
     spot_key = _resolve_spot_symbol(symbol_upper)
     spot_quote = kite.ltp([spot_key])
     spot = spot_quote[spot_key]["last_price"]
 
     payload["underlying_spot_price"] = float(spot)
-    payload["lot_size"] = lot_size
     payload["strike_step"] = float(strike_step)
 
     return result
@@ -605,6 +603,28 @@ def _run_symbol(
         liquidity_mode=args.liquidity_mode,
     ).build_option_chain(payload["instrument"], asof_time=payload["asof_time"])
 
+    # Chain may contain multiple expiries with different lot sizes.
+    # Use the dominant lot size and filter chain to matching contracts.
+    from collections import Counter
+
+    lot_size_counts = Counter(
+        int(contract["lot_size"])
+        for contract in chain
+        if contract.get("lot_size")
+    )
+
+    if not lot_size_counts:
+        raise RuntimeError(f"No lot_size found in option chain for {payload['instrument']}")
+
+    selected_lot_size = lot_size_counts.most_common(1)[0][0]
+
+    chain = [
+        contract for contract in chain
+        if int(contract.get("lot_size") or 0) == selected_lot_size
+    ]
+
+    payload["lot_size"] = selected_lot_size
+
     engine = OptionsConstructionEngine(OptionsConstructionConfig(
         audit_log_path=audit_log_path,
         reference_fixture_compatibility=args.reference_fixture_compatibility,
@@ -638,6 +658,28 @@ def _run_json(args: argparse.Namespace, kite: Any, path: str) -> dict[str, Any]:
         kite,
         liquidity_mode=args.liquidity_mode,
     ).build_option_chain(payload["instrument"], asof_time=payload["asof_time"])
+
+    # Chain may contain multiple expiries with different lot sizes.
+    # Use the dominant lot size and filter chain to matching contracts.
+    from collections import Counter
+
+    lot_size_counts = Counter(
+        int(contract["lot_size"])
+        for contract in chain
+        if contract.get("lot_size")
+    )
+
+    if not lot_size_counts:
+        raise RuntimeError(f"No lot_size found in option chain for {payload['instrument']}")
+
+    selected_lot_size = lot_size_counts.most_common(1)[0][0]
+
+    chain = [
+        contract for contract in chain
+        if int(contract.get("lot_size") or 0) == selected_lot_size
+    ]
+
+    payload["lot_size"] = selected_lot_size
 
     engine = OptionsConstructionEngine(OptionsConstructionConfig(
         audit_log_path=audit_log_path,
