@@ -227,8 +227,62 @@ def build_execution_plans(
                     str(e),
                 )
 
+            broker_gtt_missing = existing_gtt is None and persisted_trigger_price is not None
+
             if previous_trigger_price is None and persisted_trigger_price is not None:
                 previous_trigger_price = persisted_trigger_price
+
+            # RECOVERY MODE:
+            # If broker GTT is missing but we have an accepted persisted stop,
+            # do NOT recompute a new lower stop. Re-establish protection from
+            # persisted operational state, or let execution layer mark GAP_EXIT_REQUIRED
+            # if price has already crossed that persisted stop.
+            if broker_gtt_missing:
+                trigger_price = float(persisted_trigger_price)
+                current_price_reference = float(candles[-1]["close"])
+
+                order = prepare_limit_order_from_trigger(
+                    side=side,
+                    trigger_price=trigger_price,
+                    tick_size=tick_size,
+                    current_price_reference=current_price_reference,
+                )
+
+                if side == "LONG":
+                    per_unit_risk = max(0.0, entry_price - trigger_price)
+                else:
+                    per_unit_risk = max(0.0, trigger_price - entry_price)
+
+                total_risk = per_unit_risk * abs_quantity
+
+                plans.append(
+                    {
+                        "user_id": user_id,
+                        "contract_type": contract_type,
+                        "symbol_filter": symbol,
+                        "tradingsymbol": tradingsymbol,
+                        "exchange": exchange,
+                        "position_side": side,
+                        "exit_transaction_type": exit_transaction_type,
+                        "quantity": abs_quantity,
+                        "product": config.product,
+                        "entry_price": entry_price,
+                        "tick_size": tick_size,
+                        "trigger_price": trigger_price,
+                        "limit_price": float(order["limit_price"]),
+                        "current_price_reference": current_price_reference,
+                        "per_unit_risk": round(per_unit_risk, 2),
+                        "total_risk": round(total_risk, 2),
+                        "details": {
+                            "mode": "BROKER_GTT_MISSING_RECOVERY",
+                            "final_source": "PERSISTED_STOP_RECOVERY",
+                            "raw_stop": trigger_price,
+                            "validated_stop": trigger_price,
+                            "previous_trigger_price": trigger_price,
+                        },
+                    }
+                )
+                continue
 
             now = datetime.now()
 
@@ -434,7 +488,15 @@ def persist_stop_results(user_id: str, results: List[Dict], dry_run: bool) -> No
                     reason=item.get("status"),
                 )
 
-                if item.get("status") in ("SIMULATED", "SUCCESS") and item.get("action") in ("PLACE", "PLACED", "MODIFY", "MODIFIED", "UNCHANGED"):
+                # IMPORTANT:
+                # Dry-run must not mutate the operational stop state.
+                # It may insert an audit event, but stop_states must reflect only
+                # broker-applied/accepted live stop protection.
+                if (
+                    not dry_run
+                    and item.get("status") == "SUCCESS"
+                    and item.get("action") in ("PLACED", "MODIFIED", "UNCHANGED")
+                ):
                     persistence.upsert_stop_state(
                         lifecycle_id=lifecycle.id,
                         current_stop=plan["trigger_price"],

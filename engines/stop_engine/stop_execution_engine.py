@@ -223,20 +223,23 @@ def execute_stoploss_plans(
     results: List[Dict] = []
 
     for raw_plan in plans:
-        validate_plan(raw_plan)
-
         key = build_gtt_match_key_from_plan(raw_plan)
         existing_gtt = existing_gtt_map.get(key)
         plan = enrich_plan_with_existing_state(raw_plan, existing_gtt, config)
+
         logger.info(
             f"[PLAN] {plan['tradingsymbol']} | Side={plan['position_side']} | "
             f"NewTrigger={plan['trigger_price']} | OldTrigger={plan.get('existing_trigger_price')}"
         )
-        # GAP DETECTION (CRITICAL)
+
         ltp = float(plan["current_price_reference"])
         trigger = float(plan["trigger_price"])
-        side = plan["position_side"]
+        side = str(plan["position_side"]).upper()
 
+        # GAP / STOP ALREADY BREACHED DETECTION MUST RUN BEFORE validate_plan().
+        # validate_plan() rejects LONG trigger >= close_ref and SHORT trigger <= close_ref,
+        # but those are exactly the cases we need to report as GAP_EXIT_REQUIRED,
+        # not crash the whole batch.
         if (side == "LONG" and ltp <= trigger) or (side == "SHORT" and ltp >= trigger):
             logger.error(
                 f"[GAP] {plan['tradingsymbol']} | Side={side} | LTP={ltp} crossed Trigger={trigger}"
@@ -247,6 +250,23 @@ def execute_stoploss_plans(
                     "trigger_id": int(existing_gtt["id"]) if existing_gtt else None,
                     "status": "CRITICAL",
                     "error": "Price already beyond stop. Market exit required.",
+                    "plan": plan,
+                }
+            )
+            continue
+
+        try:
+            validate_plan(plan)
+        except Exception as exc:
+            logger.error(
+                f"[INVALID_PLAN] {plan.get('tradingsymbol')} | {type(exc).__name__}: {exc}"
+            )
+            results.append(
+                {
+                    "action": "ERROR",
+                    "trigger_id": int(existing_gtt["id"]) if existing_gtt else None,
+                    "status": "FAILED",
+                    "error": str(exc),
                     "plan": plan,
                 }
             )
