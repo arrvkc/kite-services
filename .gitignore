@@ -18,3 +18,7 @@ trading_code_hits.txt
 *.zip
 
 services/**/*.csv.env
+logs/
+data/
+*.csv
+*_output.json
