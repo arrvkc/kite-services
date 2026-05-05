@@ -124,6 +124,27 @@ class CoveredCall:
     cover_type: str      # FUTURE / STOCK
 
 
+@dataclass(frozen=True)
+class CoveredPut:
+    underlying: str
+    expiry_code: str
+    expiry_date: date
+    leg: OptionLeg
+    quantity: int
+    cover_type: str      # FUTURE
+
+
+@dataclass(frozen=True)
+class CreditSpread:
+    underlying: str
+    expiry_code: str
+    expiry_date: date
+    spread_type: str     # BEAR_CALL / BULL_PUT
+    short_leg: OptionLeg
+    long_leg: OptionLeg
+    quantity: int
+
+
 @dataclass
 class LegGreeks:
     iv_pct: float
@@ -260,11 +281,161 @@ def detect_short_option_underlyings(positions: List[dict]) -> List[str]:
     return sorted(symbols)
 
 
+def detect_credit_spreads(
+    positions: List[dict],
+    symbol: str,
+) -> List[CreditSpread]:
+    """
+    Detect defined-risk credit spreads.
+
+    Bear Call Spread:
+    - SELL CE at lower strike
+    - BUY CE at higher strike
+
+    Bull Put Spread:
+    - SELL PE at higher strike
+    - BUY PE at lower strike
+    """
+    symbol = symbol.upper().strip()
+
+    short_by_exp_type: Dict[Tuple[str, str], List[OptionLeg]] = {}
+    long_by_exp_type: Dict[Tuple[str, str], List[OptionLeg]] = {}
+
+    for p in positions:
+        qty = int(p.get("quantity") or 0)
+        if qty == 0:
+            continue
+
+        ts = p.get("tradingsymbol", "")
+        parsed = parse_option_symbol(ts)
+        if not parsed:
+            continue
+
+        underlying, expiry_code, expiry_dt, strike, option_type = parsed
+        if underlying != symbol:
+            continue
+
+        leg = OptionLeg(
+            tradingsymbol=ts,
+            underlying=underlying,
+            expiry_code=expiry_code,
+            expiry_date=expiry_dt,
+            strike=strike,
+            option_type=option_type,
+            quantity=qty,
+            average_price=float(p.get("average_price") or 0.0),
+            last_price=float(p.get("last_price") or 0.0),
+        )
+
+        key = (expiry_code, option_type)
+
+        if qty < 0:
+            short_by_exp_type.setdefault(key, []).append(leg)
+        else:
+            long_by_exp_type.setdefault(key, []).append(leg)
+
+    spreads: List[CreditSpread] = []
+
+    for key in sorted(set(short_by_exp_type.keys()) & set(long_by_exp_type.keys())):
+        expiry_code, option_type = key
+
+        shorts = sorted(short_by_exp_type[key], key=lambda x: x.strike)
+        longs = sorted(long_by_exp_type[key], key=lambda x: x.strike)
+
+        remaining_short = {leg.tradingsymbol: abs(leg.quantity) for leg in shorts}
+        remaining_long = {leg.tradingsymbol: abs(leg.quantity) for leg in longs}
+
+        if option_type == "CE":
+            # Bear call: short lower CE, long higher CE.
+            for short_leg in shorts:
+                for long_leg in longs:
+                    if long_leg.strike <= short_leg.strike:
+                        continue
+
+                    qty = min(
+                        remaining_short.get(short_leg.tradingsymbol, 0),
+                        remaining_long.get(long_leg.tradingsymbol, 0),
+                    )
+                    if qty <= 0:
+                        continue
+
+                    spreads.append(
+                        CreditSpread(
+                            underlying=symbol,
+                            expiry_code=expiry_code,
+                            expiry_date=short_leg.expiry_date,
+                            spread_type="BEAR_CALL",
+                            short_leg=short_leg,
+                            long_leg=long_leg,
+                            quantity=qty,
+                        )
+                    )
+
+                    remaining_short[short_leg.tradingsymbol] -= qty
+                    remaining_long[long_leg.tradingsymbol] -= qty
+
+                    if remaining_short[short_leg.tradingsymbol] <= 0:
+                        break
+
+        elif option_type == "PE":
+            # Bull put: short higher PE, long lower PE.
+            for short_leg in sorted(shorts, key=lambda x: x.strike, reverse=True):
+                for long_leg in sorted(longs, key=lambda x: x.strike, reverse=True):
+                    if long_leg.strike >= short_leg.strike:
+                        continue
+
+                    qty = min(
+                        remaining_short.get(short_leg.tradingsymbol, 0),
+                        remaining_long.get(long_leg.tradingsymbol, 0),
+                    )
+                    if qty <= 0:
+                        continue
+
+                    spreads.append(
+                        CreditSpread(
+                            underlying=symbol,
+                            expiry_code=expiry_code,
+                            expiry_date=short_leg.expiry_date,
+                            spread_type="BULL_PUT",
+                            short_leg=short_leg,
+                            long_leg=long_leg,
+                            quantity=qty,
+                        )
+                    )
+
+                    remaining_short[short_leg.tradingsymbol] -= qty
+                    remaining_long[long_leg.tradingsymbol] -= qty
+
+                    if remaining_short[short_leg.tradingsymbol] <= 0:
+                        break
+
+    return spreads
+
+
+def credit_spread_short_qty_map(
+    positions: List[dict],
+    symbol: str,
+) -> Dict[str, int]:
+    out: Dict[str, int] = {}
+
+    for spread in detect_credit_spreads(positions, symbol):
+        out[spread.short_leg.tradingsymbol] = (
+            out.get(spread.short_leg.tradingsymbol, 0) + spread.quantity
+        )
+
+    return out
+
+
 def detect_short_strangles(
     positions: List[dict],
     symbol: str,
 ) -> List[ShortStrangle]:
     symbol = symbol.upper().strip()
+    spread_short_qty = credit_spread_short_qty_map(positions, symbol)
+    covered_put_short_qty = {
+        cp.leg.tradingsymbol: cp.quantity
+        for cp in detect_covered_puts(positions, symbol)
+    }
 
     short_pes: Dict[str, List[OptionLeg]] = {}
     short_ces: Dict[str, List[OptionLeg]] = {}
@@ -346,6 +517,21 @@ def long_future_qty_for(
     for p in positions:
         if p.get("tradingsymbol") == expected:
             qty += max(0, int(p.get("quantity") or 0))
+
+    return qty
+
+
+def short_future_qty_for(
+    positions: List[dict],
+    symbol: str,
+    expiry_code: str,
+) -> int:
+    expected = f"{symbol}{expiry_code}FUT"
+    qty = 0
+
+    for p in positions:
+        if p.get("tradingsymbol") == expected:
+            qty += abs(min(0, int(p.get("quantity") or 0)))
 
     return qty
 
@@ -449,6 +635,108 @@ def detect_covered_calls(
     return covered_calls
 
 
+def detect_covered_puts(
+    positions: List[dict],
+    symbol: str,
+) -> List[CoveredPut]:
+    """
+    Detect short PE legs covered by short same-expiry futures.
+
+    Covered put:
+    - Short FUT
+    - Short PE
+    """
+    symbol = symbol.upper().strip()
+
+    covered_puts: List[CoveredPut] = []
+    short_pes: Dict[str, List[OptionLeg]] = {}
+
+    for p in positions:
+        qty = int(p.get("quantity") or 0)
+        if qty >= 0:
+            continue
+
+        ts = p.get("tradingsymbol", "")
+        parsed = parse_option_symbol(ts)
+        if not parsed:
+            continue
+
+        underlying, expiry_code, expiry_dt, strike, option_type = parsed
+        if underlying != symbol or option_type != "PE":
+            continue
+
+        leg = OptionLeg(
+            tradingsymbol=ts,
+            underlying=underlying,
+            expiry_code=expiry_code,
+            expiry_date=expiry_dt,
+            strike=strike,
+            option_type=option_type,
+            quantity=qty,
+            average_price=float(p.get("average_price") or 0.0),
+            last_price=float(p.get("last_price") or 0.0),
+        )
+
+        short_pes.setdefault(expiry_code, []).append(leg)
+
+    for expiry_code, pes in short_pes.items():
+        future_cover_available = short_future_qty_for(positions, symbol, expiry_code)
+
+        # For covered puts, nearest higher-risk short put should consume cover first.
+        for leg in sorted(pes, key=lambda x: x.strike, reverse=True):
+            short_qty = abs(leg.quantity)
+            cover_qty = min(short_qty, future_cover_available)
+            future_cover_available -= cover_qty
+
+            if cover_qty <= 0:
+                continue
+
+            covered_puts.append(
+                CoveredPut(
+                    underlying=symbol,
+                    expiry_code=leg.expiry_code,
+                    expiry_date=leg.expiry_date,
+                    leg=leg,
+                    quantity=cover_qty,
+                    cover_type="FUTURE",
+                )
+            )
+
+    return covered_puts
+
+
+def evaluate_covered_put_risk(
+    distance_pct: float,
+    net_delta: float,
+    pnl_unit: float,
+    entry_premium_unit: float,
+) -> Tuple[str, List[str]]:
+    """
+    Covered put risk:
+    - upside loss from short future
+    - downside profit capped by short put
+    - pressure increases when spot is near/below short PE strike
+    """
+    loss_unit = max(0.0, -pnl_unit)
+    abs_delta = abs(net_delta)
+
+    if (
+        distance_pct < 0.01
+        or abs_delta > 0.65
+        or loss_unit > (2.0 * entry_premium_unit)
+    ):
+        return "ADJUST", ["COVERED_PUT_NEAR_STRIKE_OR_HIGH_DELTA"]
+
+    if (
+        distance_pct < 0.03
+        or abs_delta > 0.45
+        or loss_unit > (1.0 * entry_premium_unit)
+    ):
+        return "WATCH", ["COVERED_PUT_PRESSURE_BUILDING"]
+
+    return "HOLD", ["COVERED_PUT_WITHIN_LIMITS"]
+
+
 def evaluate_covered_call_risk(
     distance_pct: float,
     short_delta: float,
@@ -497,6 +785,11 @@ def detect_naked_options(
     """
     symbol = symbol.upper().strip()
     holdings = holdings or []
+    spread_short_qty = credit_spread_short_qty_map(positions, symbol)
+    covered_put_short_qty = {
+        cp.leg.tradingsymbol: cp.quantity
+        for cp in detect_covered_puts(positions, symbol)
+    }
 
     short_pes: Dict[str, List[OptionLeg]] = {}
     short_ces: Dict[str, List[OptionLeg]] = {}
@@ -507,6 +800,11 @@ def detect_naked_options(
             continue
 
         ts = p.get("tradingsymbol", "")
+        qty += min(abs(qty), spread_short_qty.get(ts, 0))
+        qty += min(abs(qty), covered_put_short_qty.get(ts, 0))
+        if qty >= 0:
+            continue
+
         parsed = parse_option_symbol(ts)
         if not parsed:
             continue
@@ -1389,12 +1687,6 @@ def expiry_pnl_at_spot_for_short_option(
 ) -> float:
     """
     Expiry PnL for a short option if expiry happens at the current spot.
-
-    For short PE:
-        PnL = premium received - max(strike - spot, 0)
-
-    For short CE:
-        PnL = premium received - max(spot - strike, 0)
     """
     if option_type == "PE":
         intrinsic = max(strike - spot, 0.0)
@@ -1404,6 +1696,56 @@ def expiry_pnl_at_spot_for_short_option(
         intrinsic = 0.0
 
     return (premium - intrinsic) * quantity
+
+
+def expiry_pnl_at_spot_for_long_option(
+    option_type: str,
+    strike: float,
+    spot: float,
+    premium: float,
+    quantity: int,
+) -> float:
+    """
+    Expiry PnL for a long option if expiry happens at the current spot.
+    """
+    if option_type == "PE":
+        intrinsic = max(strike - spot, 0.0)
+    elif option_type == "CE":
+        intrinsic = max(spot - strike, 0.0)
+    else:
+        intrinsic = 0.0
+
+    return (intrinsic - premium) * quantity
+
+
+def evaluate_credit_spread_risk(
+    spread_type: str,
+    distance_pct: float,
+    short_delta: float,
+    pnl_scaled: float,
+    max_loss_total: float,
+) -> Tuple[str, List[str]]:
+    loss_total = max(0.0, -pnl_scaled)
+    abs_short_delta = abs(short_delta)
+
+    if (
+        distance_pct < 0.005
+        or abs_short_delta > 0.55
+        or (max_loss_total > 0 and loss_total > 0.70 * max_loss_total)
+    ):
+        return "EXIT", [f"{spread_type}_EXTREME_RISK_EXIT"]
+
+    if (
+        distance_pct < 0.02
+        or abs_short_delta > 0.40
+        or (max_loss_total > 0 and loss_total > 0.40 * max_loss_total)
+    ):
+        return "ADJUST", [f"{spread_type}_MODERATE_RISK_ADJUST"]
+
+    if distance_pct < 0.04 or abs_short_delta > 0.30:
+        return "WATCH", [f"{spread_type}_EARLY_WARNING_WATCH"]
+
+    return "HOLD", [f"{spread_type}_WITHIN_LIMITS"]
 
 
 def print_portfolio_risk_table(
@@ -1419,8 +1761,10 @@ def print_portfolio_risk_table(
 
     for symbol in symbols:
         try:
+            credit_spreads = detect_credit_spreads(positions, symbol)
             strangles = detect_short_strangles(positions, symbol)
             covered_calls = detect_covered_calls(positions, symbol, holdings=holdings)
+            covered_puts = detect_covered_puts(positions, symbol)
             naked_options = detect_naked_options(positions, symbol, holdings=holdings)
 
             # ------------------------------------------------------------
@@ -1487,6 +1831,139 @@ def print_portfolio_risk_table(
                 })
 
             # ------------------------------------------------------------
+            # CREDIT SPREADS
+            # ------------------------------------------------------------
+            for spread in credit_spreads:
+                short_leg = spread.short_leg
+                long_leg = spread.long_leg
+                qty = spread.quantity
+
+                spot_instrument = spot_instrument_for(symbol)
+                future_symbol = choose_nearest_future_symbol(positions, symbol, short_leg.expiry_code)
+                future_instrument = f"NFO:{future_symbol}"
+                short_instrument = f"NFO:{short_leg.tradingsymbol}"
+                long_instrument = f"NFO:{long_leg.tradingsymbol}"
+
+                ltp = get_ltp_map(
+                    kite,
+                    [spot_instrument, future_instrument, short_instrument, long_instrument],
+                )
+
+                spot = ltp[spot_instrument]
+                future = ltp[future_instrument]
+                short_ltp = ltp[short_instrument]
+                long_ltp = ltp[long_instrument]
+
+                t = year_fraction_to_market_close(short_leg.expiry_date)
+
+                short_iv = implied_volatility(
+                    short_ltp,
+                    future,
+                    short_leg.strike,
+                    t,
+                    risk_free_rate,
+                    short_leg.option_type,
+                )
+                long_iv = implied_volatility(
+                    long_ltp,
+                    future,
+                    long_leg.strike,
+                    t,
+                    risk_free_rate,
+                    long_leg.option_type,
+                )
+
+                short_g = greeks_forward(
+                    future,
+                    short_leg.strike,
+                    t,
+                    risk_free_rate,
+                    short_iv,
+                    short_leg.option_type,
+                )
+                long_g = greeks_forward(
+                    future,
+                    long_leg.strike,
+                    t,
+                    risk_free_rate,
+                    long_iv,
+                    long_leg.option_type,
+                )
+
+                # Spread Greeks = short leg Greeks plus long hedge Greeks.
+                net_delta = -short_g.delta + long_g.delta
+                net_gamma = -short_g.gamma + long_g.gamma
+                short_delta = -short_g.delta
+
+                short_premium = float(short_leg.average_price or 0.0)
+                long_premium = float(long_leg.average_price or 0.0)
+
+                entry_credit_unit = short_premium - long_premium
+                current_credit_unit = short_ltp - long_ltp
+                pnl_unit = entry_credit_unit - current_credit_unit
+                pnl_scaled = pnl_unit * qty
+
+                width = abs(short_leg.strike - long_leg.strike)
+                max_profit_total = entry_credit_unit * qty
+                max_loss_total = max(width - entry_credit_unit, 0.0) * qty
+
+                short_exp_at_spot = expiry_pnl_at_spot_for_short_option(
+                    option_type=short_leg.option_type,
+                    strike=short_leg.strike,
+                    spot=spot,
+                    premium=short_premium,
+                    quantity=qty,
+                )
+                long_exp_at_spot = expiry_pnl_at_spot_for_long_option(
+                    option_type=long_leg.option_type,
+                    strike=long_leg.strike,
+                    spot=spot,
+                    premium=long_premium,
+                    quantity=qty,
+                )
+                exp_at_spot = short_exp_at_spot + long_exp_at_spot
+
+                if spread.spread_type == "BEAR_CALL":
+                    distance_pct = (short_leg.strike - spot) / spot
+                    structure = f"{short_leg.strike}CE/{long_leg.strike}CE"
+                else:
+                    distance_pct = (spot - short_leg.strike) / spot
+                    structure = f"{short_leg.strike}PE/{long_leg.strike}PE"
+
+                captured_pct = (
+                    pnl_scaled / max_profit_total * 100.0
+                    if max_profit_total
+                    else 0.0
+                )
+
+                risk_score = abs(net_gamma) / max(abs(distance_pct), 0.0001)
+
+                decision, reasons = evaluate_credit_spread_risk(
+                    spread_type=spread.spread_type,
+                    distance_pct=distance_pct,
+                    short_delta=short_delta,
+                    pnl_scaled=pnl_scaled,
+                    max_loss_total=max_loss_total,
+                )
+
+                rows.append({
+                    "symbol": symbol,
+                    "type": spread.spread_type,
+                    "structure": structure,
+                    "spot": spot,
+                    "delta": net_delta,
+                    "dist": distance_pct * 100.0,
+                    "zone": risk_zone_from_distance(distance_pct * 100.0),
+                    "risk": risk_score,
+                    "pnl": pnl_scaled,
+                    "expiry_pnl": max_profit_total,
+                    "expiry_pnl_at_spot": exp_at_spot,
+                    "capture_pct": captured_pct,
+                    "decision": decision,
+                    "reason": "|".join(reasons),
+                })
+
+            # ------------------------------------------------------------
             # COVERED CALLS
             # ------------------------------------------------------------
             for cc in covered_calls:
@@ -1524,21 +2001,55 @@ def print_portfolio_risk_table(
                     leg.option_type,
                 )
 
-                short_delta = -greeks.delta
-                distance_pct = (leg.strike - spot) / spot
+                call_delta = greeks.delta
+                short_call_delta = -call_delta
+
+                # Covered call = long underlying + short call.
+                net_delta = 1.0 - call_delta
 
                 premium = float(leg.average_price or 0.0)
-                pnl_unit = premium - option_ltp
+                option_pnl_unit = premium - option_ltp
+
+                cover_entry = None
+                if cc.cover_type == "FUTURE":
+                    for p in positions:
+                        if p.get("tradingsymbol") == future_symbol and int(p.get("quantity") or 0) > 0:
+                            cover_entry = float(p.get("average_price") or 0.0)
+                            break
+                    cover_price = future
+                else:
+                    for h in holdings:
+                        if str(h.get("tradingsymbol", "")).upper() == symbol.upper():
+                            cover_entry = float(h.get("average_price") or 0.0)
+                            break
+                    cover_price = spot
+
+                if cover_entry is None:
+                    underlying_pnl_unit = 0.0
+                    underlying_expiry_pnl_unit = 0.0
+                    max_profit_total = premium * qty
+                else:
+                    underlying_pnl_unit = cover_price - cover_entry
+                    underlying_expiry_pnl_unit = spot - cover_entry
+
+                    # Covered call max expiry profit when underlying closes at or above short call strike.
+                    max_profit_total = ((leg.strike - cover_entry) + premium) * qty
+
+                pnl_unit = underlying_pnl_unit + option_pnl_unit
                 pnl_scaled = pnl_unit * qty
 
-                max_profit_total = premium * qty
-                exp_at_spot = expiry_pnl_at_spot_for_short_option(
+                option_exp_at_spot = expiry_pnl_at_spot_for_short_option(
                     option_type=leg.option_type,
                     strike=leg.strike,
                     spot=spot,
                     premium=premium,
                     quantity=qty,
                 )
+                underlying_exp_at_spot = underlying_expiry_pnl_unit * qty
+                exp_at_spot = underlying_exp_at_spot + option_exp_at_spot
+
+                distance_pct = (leg.strike - spot) / spot
+
                 captured_pct = (
                     pnl_scaled / max_profit_total * 100.0
                     if max_profit_total
@@ -1547,7 +2058,7 @@ def print_portfolio_risk_table(
 
                 decision, reasons = evaluate_covered_call_risk(
                     distance_pct=distance_pct,
-                    short_delta=short_delta,
+                    short_delta=short_call_delta,
                     pnl_unit=pnl_unit,
                     entry_premium_unit=premium,
                 )
@@ -1557,7 +2068,116 @@ def print_portfolio_risk_table(
                     "type": f"COV_CALL_{cc.cover_type}",
                     "structure": str(leg.strike),
                     "spot": spot,
-                    "delta": short_delta,
+                    "delta": net_delta,
+                    "dist": distance_pct * 100.0,
+                    "zone": risk_zone_from_distance(distance_pct * 100.0),
+                    "risk": 0.0,
+                    "pnl": pnl_scaled,
+                    "expiry_pnl": max_profit_total,
+                    "expiry_pnl_at_spot": exp_at_spot,
+                    "capture_pct": captured_pct,
+                    "decision": decision,
+                    "reason": "|".join(reasons),
+                })
+
+            # ------------------------------------------------------------
+            # COVERED PUTS
+            # ------------------------------------------------------------
+            for cp in covered_puts:
+                leg = cp.leg
+                qty = cp.quantity
+
+                spot_instrument = spot_instrument_for(symbol)
+                future_symbol = choose_nearest_future_symbol(positions, symbol, leg.expiry_code)
+                future_instrument = f"NFO:{future_symbol}"
+                option_instrument = f"NFO:{leg.tradingsymbol}"
+
+                ltp = get_ltp_map(kite, [spot_instrument, future_instrument, option_instrument])
+
+                spot = ltp[spot_instrument]
+                future = ltp[future_instrument]
+                option_ltp = ltp[option_instrument]
+
+                t = year_fraction_to_market_close(leg.expiry_date)
+
+                iv = implied_volatility(
+                    option_ltp,
+                    future,
+                    leg.strike,
+                    t,
+                    risk_free_rate,
+                    leg.option_type,
+                )
+
+                greeks = greeks_forward(
+                    future,
+                    leg.strike,
+                    t,
+                    risk_free_rate,
+                    iv,
+                    leg.option_type,
+                )
+
+                # Covered put = short future + short put.
+                # Long PE delta is negative. Short PE delta is positive.
+                short_put_delta = -greeks.delta
+                net_delta = -1.0 + short_put_delta
+
+                premium = float(leg.average_price or 0.0)
+                option_pnl_unit = premium - option_ltp
+
+                future_entry = None
+                for p in positions:
+                    if p.get("tradingsymbol") == future_symbol and int(p.get("quantity") or 0) < 0:
+                        future_entry = float(p.get("average_price") or 0.0)
+                        break
+
+                if future_entry is None:
+                    future_pnl_unit = 0.0
+                    future_expiry_pnl_unit = 0.0
+                    max_profit_total = premium * qty
+                else:
+                    # Short future PnL = entry - current.
+                    future_pnl_unit = future_entry - future
+                    future_expiry_pnl_unit = future_entry - spot
+
+                    # Covered put max expiry profit when underlying closes at or below short put strike.
+                    max_profit_total = ((future_entry - leg.strike) + premium) * qty
+
+                pnl_unit = future_pnl_unit + option_pnl_unit
+                pnl_scaled = pnl_unit * qty
+
+                option_exp_at_spot = expiry_pnl_at_spot_for_short_option(
+                    option_type=leg.option_type,
+                    strike=leg.strike,
+                    spot=spot,
+                    premium=premium,
+                    quantity=qty,
+                )
+                future_exp_at_spot = future_expiry_pnl_unit * qty
+                exp_at_spot = future_exp_at_spot + option_exp_at_spot
+
+                distance_pct = (spot - leg.strike) / spot
+
+                captured_pct = (
+                    pnl_scaled / max_profit_total * 100.0
+                    if max_profit_total
+                    else 0.0
+                )
+
+                decision, reasons = evaluate_covered_put_risk(
+                    distance_pct=distance_pct,
+                    net_delta=net_delta,
+                    pnl_unit=pnl_unit,
+                    entry_premium_unit=premium,
+                )
+
+                rows.append({
+                    "symbol": symbol,
+                    "type": f"COV_PUT_{cp.cover_type}",
+                    "structure": str(leg.strike),
+                    "spot": spot,
+                    "delta": net_delta,
                     "dist": distance_pct * 100.0,
                     "zone": risk_zone_from_distance(distance_pct * 100.0),
                     "risk": 0.0,
@@ -1626,6 +2246,7 @@ def print_portfolio_risk_table(
                     premium=premium,
                     quantity=qty,
                 )
+
                 captured_pct = (
                     pnl_scaled / max_profit_total * 100.0
                     if max_profit_total
@@ -1658,7 +2279,7 @@ def print_portfolio_risk_table(
                     "reason": "|".join(reasons),
                 })
 
-            if not strangles and not covered_calls and not naked_options:
+            if not credit_spreads and not strangles and not covered_calls and not covered_puts and not naked_options:
                 rows.append({
                     "symbol": symbol,
                     "type": "-",
