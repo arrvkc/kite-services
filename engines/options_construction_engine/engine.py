@@ -384,8 +384,9 @@ class OptionsConstructionEngine:
                 return UNDERLYING_MISMATCH, [_error(UNDERLYING_MISMATCH, "option contract underlying does not match input instrument.")]
             if c.lot_size is not None and int(c.lot_size) != lot_size:
                 return LOT_SIZE_MISMATCH, [_error(LOT_SIZE_MISMATCH, "option contract lot_size does not match input lot_size.")]
-            if abs((c.strike / strike_step) - round(c.strike / strike_step)) > 1e-9:
-                return EXPIRY_MISMATCH, [_error(EXPIRY_MISMATCH, "option contract strike is not aligned to strike_step.")]
+            # Do not validate absolute divisibility of strike by strike_step.
+            # Exchange-listed option chains can have shifted strike grids
+            # such as 207.5, 209.5, 211.5 even when the interval is valid.
             if not c.tradingsymbol:
                 return BROKER_INSTRUMENT_NOT_FOUND, [_error(BROKER_INSTRUMENT_NOT_FOUND, "tradingsymbol is missing.")]
         return None
