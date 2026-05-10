@@ -42,6 +42,30 @@ def build_argument_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def build_symbol_rows(args, result) -> list[dict]:
+    history_df = result.history.copy()
+    symbol_rows: list[dict] = []
+
+    for _, row in history_df.iterrows():
+        symbol_rows.append(
+            {
+                "user_id": args.user_id,
+                "symbol": result.symbol,
+                "trade_date": to_date(row["date"]),
+                "close": clean_value(row.get("close")),
+                "label": clean_value(row.get("label")),
+                "confidence": clean_value(row.get("confidence")),
+                "aggregate_score": clean_value(row.get("aggregate_score")),
+                "internal_state": clean_value(row.get("internal_state")),
+                "exchange": result.exchange,
+                "tradingsymbol": result.tradingsymbol,
+                "instrument_token": result.instrument_token,
+            }
+        )
+
+    return symbol_rows
+
+
 def main() -> None:
     args = build_argument_parser().parse_args()
 
@@ -58,7 +82,8 @@ def main() -> None:
 
     history_runner = EquityTrendHistoryRunner(kite=kite, exchange="NSE")
 
-    rows: list[dict] = []
+    engine = None if args.dry_run else get_engine()
+    total_rows = 0
     failures: list[dict] = []
 
     for index, symbol in enumerate(symbols, start=1):
@@ -68,40 +93,29 @@ def main() -> None:
                 history_days=args.history_days,
             )
 
-            history_df = result.history.copy()
+            symbol_rows = build_symbol_rows(args, result)
 
-            for _, row in history_df.iterrows():
-                rows.append(
-                    {
-                        "user_id": args.user_id,
-                        "symbol": result.symbol,
-                        "trade_date": to_date(row["date"]),
-                        "close": clean_value(row.get("close")),
-                        "label": clean_value(row.get("label")),
-                        "confidence": clean_value(row.get("confidence")),
-                        "aggregate_score": clean_value(row.get("aggregate_score")),
-                        "internal_state": clean_value(row.get("internal_state")),
-                        "exchange": result.exchange,
-                        "tradingsymbol": result.tradingsymbol,
-                        "instrument_token": result.instrument_token,
-                    }
+            if args.dry_run:
+                total_rows += len(symbol_rows)
+                print(f"[{index}/{len(symbols)}] DRY OK {symbol} rows={len(symbol_rows)}", flush=True)
+            else:
+                written = upsert_trend_history_rows(
+                    engine,
+                    symbol_rows,
+                    batch_size=args.batch_size,
                 )
-
-            print(f"[{index}/{len(symbols)}] OK {symbol} rows={len(history_df)}")
+                total_rows += written
+                print(f"[{index}/{len(symbols)}] OK {symbol} committed_rows={written}", flush=True)
 
         except Exception as exc:
             failures.append({"symbol": symbol, "error": str(exc)})
-            print(f"[{index}/{len(symbols)}] FAIL {symbol}: {exc}")
+            print(f"[{index}/{len(symbols)}] FAIL {symbol}: {exc}", flush=True)
 
     if args.dry_run:
-        print(f"DRY RUN: prepared_rows={len(rows)} failures={len(failures)}")
-        return
-
-    engine = get_engine()
-    written = upsert_trend_history_rows(engine, rows, batch_size=args.batch_size)
-
-    print(f"UPSERTED trend_history_fo_universe rows={written}")
-    print(f"FAILURES count={len(failures)}")
+        print(f"DRY RUN: prepared_rows={total_rows} failures={len(failures)}")
+    else:
+        print(f"UPSERTED trend_history_fo_universe rows={total_rows}")
+        print(f"FAILURES count={len(failures)}")
 
     if failures:
         for failure in failures[:20]:
