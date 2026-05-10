@@ -21,6 +21,14 @@ class ContractInfo:
 
 
 class TrendIdentifierBatchAdapter:
+
+    @classmethod
+    def from_dataframes(cls, trend_history_df, contract_snapshot_df):
+        return cls(
+            trend_history_df=trend_history_df,
+            contract_snapshot_df=contract_snapshot_df,
+        )
+
     def __init__(
         self,
         trend_history_df: pd.DataFrame,
