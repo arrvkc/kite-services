@@ -15,7 +15,7 @@ from engines.strategy_deterministic_engine.db.postgres import get_engine, load_e
 
 
 RAW_COLUMNS = [
-    "SYMBOL", "LABEL", "SCORE", "CONF", "STATE",
+    "SYMBOL", "PREV_LABEL", "LABEL", "LABEL_TRANSITION", "SCORE", "CONF", "STATE",
     "BULL5", "BEAR5", "FLAT5", "SIGNFLIP5", "MEAN3",
     "NEAR_DTE", "NEXT_DTE", "REGIME", "CANDIDATE_FAMILY",
     "STRATEGY_FAMILY", "CONTRACT_MONTH", "STRENGTH", "TOP_N",
@@ -30,6 +30,12 @@ RANKED_COLUMNS = [
 
 NON_RANKED_COLUMNS = [
     "SYMBOL", "LABEL", "SCORE", "CONF", "STRENGTH",
+    "REGIME", "CANDIDATE_FAMILY", "STRATEGY_FAMILY", "CONTRACT_MONTH",
+]
+
+TRANSITION_COLUMNS = [
+    "SYMBOL", "PREV_LABEL", "LABEL", "LABEL_TRANSITION",
+    "SCORE", "CONF", "STRENGTH", "RANK_ALL",
     "REGIME", "CANDIDATE_FAMILY", "STRATEGY_FAMILY", "CONTRACT_MONTH",
 ]
 
@@ -63,32 +69,60 @@ def get_raw_results(engine, run_date: date) -> pd.DataFrame:
     return read_df(
         engine,
         """
+        WITH latest_trend AS (
+            SELECT
+                r.symbol,
+                th.trade_date,
+                th.label,
+                ROW_NUMBER() OVER (
+                    PARTITION BY r.symbol
+                    ORDER BY th.trade_date DESC
+                ) AS rn
+            FROM strategy_deterministic_engine_batch_results r
+            JOIN trend_history_fo_universe th
+              ON th.symbol = r.symbol
+             AND th.trade_date <= r.run_date
+            WHERE r.run_date = :run_date
+        ),
+        trend_labels AS (
+            SELECT
+                symbol,
+                MAX(CASE WHEN rn = 1 THEN label END) AS current_label,
+                MAX(CASE WHEN rn = 2 THEN label END) AS previous_label
+            FROM latest_trend
+            WHERE rn <= 2
+            GROUP BY symbol
+        )
         SELECT
-            symbol AS "SYMBOL",
-            label AS "LABEL",
-            ROUND(score::numeric, 2) AS "SCORE",
-            ROUND(confidence::numeric, 4) AS "CONF",
-            state AS "STATE",
-            bull_count_5 AS "BULL5",
-            bear_count_5 AS "BEAR5",
-            flat_count_5 AS "FLAT5",
-            sign_flip_count_5 AS "SIGNFLIP5",
-            ROUND(mean_score_3::numeric, 2) AS "MEAN3",
-            dte_near_month AS "NEAR_DTE",
-            dte_next_month AS "NEXT_DTE",
-            regime_bucket AS "REGIME",
-            candidate_family AS "CANDIDATE_FAMILY",
-            strategy_family AS "STRATEGY_FAMILY",
-            contract_month_selection AS "CONTRACT_MONTH",
-            final_strategy_strength AS "STRENGTH",
-            CASE WHEN include_in_top_n THEN 'YES' ELSE 'NO' END AS "TOP_N",
-            rank_overall AS "RANK_ALL",
-            rank_in_family AS "RANK_FAMILY",
-            strategy_transition_state AS "TRANSITION_STATE",
-            reason_codes AS "REASONS"
-        FROM strategy_deterministic_engine_batch_results
-        WHERE run_date = :run_date
-        ORDER BY symbol
+            r.symbol AS "SYMBOL",
+            tl.previous_label AS "PREV_LABEL",
+            r.label AS "LABEL",
+            CONCAT(tl.previous_label, ' - ', r.label) AS "LABEL_TRANSITION",
+            ROUND(r.score::numeric, 2) AS "SCORE",
+            ROUND(r.confidence::numeric, 4) AS "CONF",
+            r.state AS "STATE",
+            r.bull_count_5 AS "BULL5",
+            r.bear_count_5 AS "BEAR5",
+            r.flat_count_5 AS "FLAT5",
+            r.sign_flip_count_5 AS "SIGNFLIP5",
+            ROUND(r.mean_score_3::numeric, 2) AS "MEAN3",
+            r.dte_near_month AS "NEAR_DTE",
+            r.dte_next_month AS "NEXT_DTE",
+            r.regime_bucket AS "REGIME",
+            r.candidate_family AS "CANDIDATE_FAMILY",
+            r.strategy_family AS "STRATEGY_FAMILY",
+            r.contract_month_selection AS "CONTRACT_MONTH",
+            r.final_strategy_strength AS "STRENGTH",
+            CASE WHEN r.include_in_top_n THEN 'YES' ELSE 'NO' END AS "TOP_N",
+            r.rank_overall AS "RANK_ALL",
+            r.rank_in_family AS "RANK_FAMILY",
+            r.strategy_transition_state AS "TRANSITION_STATE",
+            r.reason_codes AS "REASONS"
+        FROM strategy_deterministic_engine_batch_results r
+        LEFT JOIN trend_labels tl
+          ON tl.symbol = r.symbol
+        WHERE r.run_date = :run_date
+        ORDER BY r.symbol
         """,
         {"run_date": run_date},
     )
@@ -144,6 +178,19 @@ def write_excel_report(raw_df: pd.DataFrame, run_date: date, output_path: Path) 
         .copy()
     )
 
+    allowed_transitions = {
+        "DOWN - FLAT",
+        "FLAT - UP",
+        "UP - FLAT",
+        "FLAT - DOWN",
+    }
+
+    sheet6 = (
+        raw_df[raw_df["LABEL_TRANSITION"].astype(str).str.upper().isin(allowed_transitions)][TRANSITION_COLUMNS]
+        .sort_values("RANK_ALL", na_position="last")
+        .copy()
+    )
+
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
         raw_df[RAW_COLUMNS].to_excel(writer, sheet_name="strategy_deterministic_engine_b", index=False)
         sheet1.to_excel(writer, sheet_name="Sheet1", index=False)
@@ -151,6 +198,7 @@ def write_excel_report(raw_df: pd.DataFrame, run_date: date, output_path: Path) 
         sheet3.to_excel(writer, sheet_name="Sheet3", index=False)
         sheet4.to_excel(writer, sheet_name="Sheet4", index=False)
         sheet5.to_excel(writer, sheet_name="Sheet5", index=False)
+        sheet6.to_excel(writer, sheet_name="Sheet6_Label_Transitions", index=False)
 
         for sheet_name in writer.sheets:
             style_sheet(writer, sheet_name)
@@ -181,6 +229,7 @@ The workbook contains the exact report layout:
 - Sheet3
 - Sheet4
 - Sheet5
+- Sheet6_Label_Transitions
 
 Regards,
 Kite Services
