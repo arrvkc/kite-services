@@ -3,7 +3,8 @@ import html
 import json
 import pandas as pd
 
-BASE = Path("/Users/chakravarthi/kite_services/data/strategy_transition_reports")
+REPO_ROOT = Path(__file__).resolve().parents[3]
+BASE = REPO_ROOT / "data" / "strategy_transition_reports"
 csv_path = BASE / "strategy_transition_scanner_latest.csv"
 html_path = BASE / "strategy_transition_report_latest.html"
 
