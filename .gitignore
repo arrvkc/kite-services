@@ -22,3 +22,11 @@ logs/
 data/
 *.csv
 *_output.json
+
+# Local automation secrets
+secrets/
+logs/eajee_web_automation/
+
+# EAJEE automation local/runtime files
+secrets/
+logs/eajee_web_automation/
