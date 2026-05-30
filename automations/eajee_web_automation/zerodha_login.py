@@ -1,41 +1,19 @@
-import json
-import time
-from pathlib import Path
-
 import pyotp
 
+from .credentials import get_zerodha_credentials
 from .run_context import RUN_DIR
 
 
-def load_zerodha_credentials(user_id):
-    path = Path.home() / "kite_services" / "secrets" / f"zerodha_{user_id}.json"
+def complete_zerodha_login(page, user_id, artifact_dir=None):
+    creds = get_zerodha_credentials(user_id)
 
-    if not path.exists():
-        raise RuntimeError(f"Credential file not found: {path}")
-
-    data = json.loads(path.read_text())
-
-    required = [
-        "zerodha_user_id",
-        "zerodha_password",
-        "zerodha_totp_hash",
-    ]
-
-    missing = [key for key in required if not data.get(key)]
-
-    if missing:
-        raise RuntimeError(f"Missing Zerodha credentials: {missing}")
-
-    return data
-
-
-def complete_zerodha_login(page, user_id):
-    creds = load_zerodha_credentials(user_id)
+    if artifact_dir is None:
+        artifact_dir = RUN_DIR
 
     page.wait_for_timeout(2000)
 
     page.screenshot(
-        path=str(RUN_DIR / "07_zerodha_login_page.png"),
+        path=str(artifact_dir / "07_zerodha_login_page.png"),
         full_page=True,
     )
 
@@ -46,7 +24,7 @@ def complete_zerodha_login(page, user_id):
     page.fill("input#password", creds["zerodha_password"])
 
     page.screenshot(
-        path=str(RUN_DIR / "08_zerodha_credentials_filled.png"),
+        path=str(artifact_dir / "08_zerodha_credentials_filled.png"),
         full_page=True,
     )
 
@@ -55,38 +33,33 @@ def complete_zerodha_login(page, user_id):
     page.wait_for_timeout(2000)
 
     page.screenshot(
-        path=str(RUN_DIR / "09_zerodha_totp_page.png"),
+        path=str(artifact_dir / "09_zerodha_totp_page.png"),
         full_page=True,
     )
 
     totp = pyotp.TOTP(creds["zerodha_totp_hash"]).now()
 
-    totp_selectors = [
+    selectors = [
         "input[type='text']",
         "input[type='number']",
-        "input#userid",
         "input",
     ]
 
-    filled = False
-
-    for selector in totp_selectors:
+    for selector in selectors:
         locator = page.locator(selector)
         if locator.count() > 0:
             locator.first.fill(totp)
-            filled = True
             print(f"Filled TOTP using selector: {selector}")
             break
-
-    if not filled:
-        raise RuntimeError("Could not find Zerodha TOTP input")
+    else:
+        raise RuntimeError("Zerodha TOTP input not found")
 
     page.keyboard.press("Enter")
 
     page.wait_for_timeout(5000)
 
     page.screenshot(
-        path=str(RUN_DIR / "10_after_zerodha_totp_submit.png"),
+        path=str(artifact_dir / "10_after_zerodha_totp_submit.png"),
         full_page=True,
     )
 
