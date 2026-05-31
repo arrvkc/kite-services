@@ -1,23 +1,17 @@
 import shutil
-from pathlib import Path
-from datetime import datetime
 
-BASE_DIR = Path.home() / "kite_services"
+from .config import RUNS_DIR
 
-RUN_ID = datetime.now().strftime("%Y%m%d_%H%M%S")
+RUN_ID = __import__("datetime").datetime.now().strftime("%Y%m%d_%H%M%S")
 
-RUNS_BASE_DIR = (
-    BASE_DIR
-    / "logs"
-    / "eajee_web_automation"
-    / "runs"
+RUN_DIR = RUNS_DIR / RUN_ID
+
+RUN_DIR.mkdir(
+    parents=True,
+    exist_ok=True,
 )
 
-RUN_DIR = RUNS_BASE_DIR / RUN_ID
-
-RUN_DIR.mkdir(parents=True, exist_ok=True)
-
-ZIP_FILE = RUNS_BASE_DIR / f"{RUN_ID}.zip"
+ZIP_FILE = RUNS_DIR / f"{RUN_ID}.zip"
 
 
 def zip_run():
