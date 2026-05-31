@@ -59,7 +59,11 @@ def run_single_user(user_id, headless):
 
 def parse_new_rows(before, after):
     new_text = after.replace(before, "").strip()
-    lines = [line for line in new_text.splitlines() if line.strip()]
+    lines = [
+        line
+        for line in new_text.splitlines()
+        if line.strip() and not line.startswith("timestamp,")
+    ]
 
     parsed = []
 
