@@ -625,14 +625,14 @@ tr:hover {{
 }}
 
 
-.search-box {
+.search-box {{
     width: 100%;
     padding: 12px 14px;
     border: 1px solid #d0d5dd;
     border-radius: 10px;
     font-size: 14px;
     box-sizing: border-box;
-}
+}}
 
 .footer {{
     color: #64748b;
