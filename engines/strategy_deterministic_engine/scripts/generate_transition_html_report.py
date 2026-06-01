@@ -624,8 +624,19 @@ tr:hover {{
     font-weight: 700;
 }}
 
+
+.search-box {
+    width: 100%;
+    padding: 12px 14px;
+    border: 1px solid #d0d5dd;
+    border-radius: 10px;
+    font-size: 14px;
+    box-sizing: border-box;
+}
+
 .footer {{
     color: #64748b;
+
     font-size: 12px;
     margin-top: 20px;
 }}
@@ -638,6 +649,17 @@ tr:hover {{
     <h1>Strategy Transition Report</h1>
     <p>Run date: {html.escape(run_date)} · Deterministic strategy transition scanner with price and volume confirmation</p>
 </div>
+
+
+<div class="section">
+    <h2>Search</h2>
+    <input
+        id="globalSearch"
+        class="search-box"
+        type="text"
+        placeholder="Search symbol, strategy, transition, reason code, signal quality...">
+</div>
+
 
 <div class="cards">
     <div class="card"><div class="label">Total Changes</div><div class="value">{total}</div></div>
