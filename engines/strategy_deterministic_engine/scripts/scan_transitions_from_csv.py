@@ -204,13 +204,13 @@ def main() -> None:
             if prev["strategy_transition_state"] != curr["strategy_transition_state"]:
                 change_types.append("TRANSITION_STATE_CHANGE")
 
-            if not change_types:
-                continue
+            event_type = "TRANSITION" if change_types else "NON_TRANSITION"
 
             rows.append(
                 {
                     "run_date": curr["run_date"].date().isoformat(),
                     "symbol": symbol,
+                    "event_type": event_type,
                     "change_types": ",".join(change_types),
                     "previous_regime_bucket": prev["regime_bucket"],
                     "current_regime_bucket": curr["regime_bucket"],
@@ -256,7 +256,21 @@ def main() -> None:
 
         out = pd.DataFrame(enriched_rows)
 
-    out = out.sort_values(["run_date", "change_types", "symbol"]).reset_index(drop=True)
+        def _keep_signal_row(row):
+            if row.get("event_type") == "TRANSITION":
+                return True
+
+            vol = row.get("volume_ratio_20d")
+            pchg = row.get("price_change_pct")
+
+            high_vol = pd.notna(vol) and float(vol) >= 1.5
+            strong_price = pd.notna(pchg) and abs(float(pchg)) >= 2
+
+            return high_vol or strong_price
+
+        out = out[out.apply(_keep_signal_row, axis=1)].copy()
+
+    out = out.sort_values(["run_date", "event_type", "change_types", "symbol"]).reset_index(drop=True)
 
     output_path = Path(args.output_csv)
     output_path.parent.mkdir(parents=True, exist_ok=True)
