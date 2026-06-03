@@ -5,24 +5,35 @@ from pathlib import Path
 
 import pandas as pd
 
-
-REPORT_CSV = (
-    "data/strategy_validation/"
-    "directional_accuracy_report.csv"
-)
-
-OUTPUT_HTML = (
-    "data/strategy_validation/"
-    "validation_dashboard.html"
-)
+REPORT_CSV = "data/strategy_validation/directional_accuracy_report.csv"
+VALIDATION_CSV = "data/strategy_validation/fo_universe_validation.csv"
+OUTPUT_HTML = "data/strategy_validation/validation_dashboard.html"
 
 
 def main():
 
-    df = pd.read_csv(REPORT_CSV)
+    report_df = pd.read_csv(REPORT_CSV)
 
-    data_json = json.dumps(
-        df.to_dict(orient="records")
+    signal_df = pd.read_csv(VALIDATION_CSV)
+
+    signal_df["strength_bucket"] = pd.cut(
+        signal_df["strength"],
+        bins=[-1, 19, 39, 59, 79, 100],
+        labels=[
+            "00-19",
+            "20-39",
+            "40-59",
+            "60-79",
+            "80-100",
+        ],
+    )
+
+    report_json = json.dumps(
+        report_df.fillna("").to_dict(orient="records")
+    )
+
+    signal_json = json.dumps(
+        signal_df.fillna("").to_dict(orient="records")
     )
 
     html = f"""
@@ -30,78 +41,45 @@ def main():
 <html>
 <head>
 <meta charset="utf-8">
-
-<title>
-Deriviq Research Dashboard
-</title>
+<title>Deriviq Research Dashboard</title>
 
 <style>
 
 body {{
     font-family: Arial, sans-serif;
     margin: 20px;
-    background: #f8fafc;
-}}
-
-h1 {{
-    margin-bottom: 20px;
 }}
 
 .toolbar {{
-    display: flex;
-    gap: 10px;
-    margin-bottom: 20px;
+    display:flex;
+    gap:10px;
+    margin-bottom:20px;
 }}
 
-select,
-input {{
-    padding: 8px;
-}}
-
-.card-container {{
-    display: flex;
-    gap: 20px;
-    margin-bottom: 20px;
-}}
-
-.card {{
-    background: white;
-    border-radius: 8px;
-    padding: 16px;
-    min-width: 220px;
-    box-shadow:
-        0 1px 4px
-        rgba(0,0,0,.1);
-}}
-
-.card-title {{
-    font-size: 12px;
-    color: #666;
-}}
-
-.card-value {{
-    font-size: 28px;
-    font-weight: bold;
+select,input {{
+    padding:8px;
 }}
 
 table {{
-    width: 100%;
-    border-collapse: collapse;
-    background: white;
+    width:100%;
+    border-collapse:collapse;
 }}
 
-th,
-td {{
-    border: 1px solid #ddd;
-    padding: 8px;
+th,td {{
+    border:1px solid #ddd;
+    padding:8px;
 }}
 
 th {{
-    background: #f1f5f9;
+    background:#f5f5f5;
 }}
 
 tr:hover {{
-    background: #f8fafc;
+    background:#f8f8f8;
+}}
+
+.clickable {{
+    cursor:pointer;
 }}
 
 .green {{
@@ -124,74 +102,60 @@ tr:hover {{
     color:white;
 }}
 
+#modal {{
+    display:none;
+    position:fixed;
+    top:0;
+    left:0;
+    width:100%;
+    height:100%;
+    background:rgba(0,0,0,.5);
+    overflow:auto;
+}}
+
+#modal-content {{
+    background:white;
+    width:95%;
+    margin:20px auto;
+    padding:20px;
+}}
+
+.close-btn {{
+    padding:8px 16px;
+}}
+
 </style>
+
 </head>
 
 <body>
 
-<h1>
-Deriviq Research Dashboard
-</h1>
+<h1>Deriviq Research Dashboard</h1>
 
 <div class="toolbar">
 
 <input
-    id="searchBox"
-    placeholder="Search..."
+id="searchBox"
+placeholder="Search..."
 >
 
 <select id="symbolFilter">
-<option value="">
-All Symbols
-</option>
+<option value="">All Symbols</option>
 </select>
 
 <select id="regimeFilter">
-<option value="">
-All Regimes
-</option>
+<option value="">All Regimes</option>
 </select>
 
 <select id="strategyFilter">
-<option value="">
-All Strategies
-</option>
+<option value="">All Strategies</option>
 </select>
-
-</div>
-
-<div class="card-container">
-
-<div class="card">
-<div class="card-title">
-Rows
-</div>
-<div
-class="card-value"
-id="rowCount"
->
-0
-</div>
-</div>
-
-<div class="card">
-<div class="card-title">
-Symbols
-</div>
-<div
-class="card-value"
-id="symbolCount"
->
-0
-</div>
-</div>
 
 </div>
 
 <table>
 
 <thead>
-
 <tr>
 <th>Scope</th>
 <th>Symbol</th>
@@ -204,7 +168,6 @@ id="symbolCount"
 <th>2%</th>
 <th>3%</th>
 </tr>
-
 </thead>
 
 <tbody id="tbody">
@@ -212,70 +175,166 @@ id="symbolCount"
 
 </table>
 
+<div id="modal">
+
+<div id="modal-content">
+
+<h2 id="modal-title">
+Signal Details
+</h2>
+
+<button
+class="close-btn"
+onclick="closeModal()"
+>
+Close
+</button>
+
+<br><br>
+
+<table>
+
+<thead>
+<tr>
+<th>Date</th>
+<th>Symbol</th>
+<th>Strength</th>
+<th>Confidence</th>
+<th>Score</th>
+<th>Return 5D</th>
+</tr>
+</thead>
+
+<tbody id="detail-body">
+</tbody>
+
+</table>
+
+</div>
+
+</div>
+
 <script>
 
-const DATA = {data_json};
+const DATA = {report_json};
 
-function heat(v) {{
+const SIGNALS = {signal_json};
 
-    if(v >= 60)
-        return 'green';
-
-    if(v >= 50)
-        return 'lgreen';
-
-    if(v >= 40)
-        return 'yellow';
-
+function heat(v){{
+    if(v >= 60) return 'green';
+    if(v >= 50) return 'lgreen';
+    if(v >= 40) return 'yellow';
     return 'red';
 }}
 
 const symbols =
 [
     ...new Set(
-        DATA.map(
-            x => x.symbol
-        )
+        DATA.map(x=>x.symbol)
     )
 ].sort();
 
 const regimes =
 [
     ...new Set(
-        DATA.map(
-            x => x.regime
-        )
+        DATA.map(x=>x.regime)
     )
 ].sort();
 
 const strategies =
 [
     ...new Set(
-        DATA.map(
-            x => x.strategy_family
-        )
+        DATA.map(x=>x.strategy_family)
     )
 ].sort();
 
-symbols.forEach(v => {{
+symbols.forEach(v=>{{
     symbolFilter.innerHTML +=
-        `<option>${{v}}</option>`;
+    `<option>${{v}}</option>`;
 }});
 
-regimes.forEach(v => {{
+regimes.forEach(v=>{{
     regimeFilter.innerHTML +=
-        `<option>${{v}}</option>`;
+    `<option>${{v}}</option>`;
 }});
 
-strategies.forEach(v => {{
+strategies.forEach(v=>{{
     strategyFilter.innerHTML +=
-        `<option>${{v}}</option>`;
+    `<option>${{v}}</option>`;
 }});
 
-symbolCount.innerText =
-    symbols.length;
+function closeModal(){{
+    modal.style.display='none';
+}}
 
-function render() {{
+function showDetails(
+    symbol,
+    regime,
+    strategy,
+    bucket
+){{
+
+    const rows =
+        SIGNALS.filter(r =>
+
+            r.symbol === symbol &&
+            r.regime === regime &&
+            r.strategy_family === strategy &&
+            r.strength_bucket === bucket
+
+        );
+
+    modal.style.display='block';
+
+    modalTitle =
+        document.getElementById(
+            'modal-title'
+        );
+
+    modalTitle.innerText =
+        symbol +
+        ' | ' +
+        strategy +
+        ' | ' +
+        bucket;
+
+    detailBody =
+        document.getElementById(
+            'detail-body'
+        );
+
+    detailBody.innerHTML='';
+
+    rows
+    .sort(
+        (a,b)=>
+        b.strength-a.strength
+    )
+    .forEach(r=>{{
+
+        const tr =
+            document.createElement(
+                'tr'
+            );
+
+        tr.innerHTML = `
+        <td>${{r.run_date}}</td>
+        <td>${{r.symbol}}</td>
+        <td>${{r.strength}}</td>
+        <td>${{Number(r.confidence).toFixed(2)}}</td>
+        <td>${{Number(r.score).toFixed(2)}}</td>
+        <td>${{Number(r.return_5d_pct).toFixed(2)}}</td>
+        `;
+
+        detailBody.appendChild(
+            tr
+        );
+
+    }});
+
+}}
+
+function render(){{
 
     const search =
         searchBox.value
@@ -291,7 +350,7 @@ function render() {{
         strategyFilter.value;
 
     const rows =
-        DATA.filter(r => {{
+        DATA.filter(r=>{{
 
             if(
                 symbol &&
@@ -317,16 +376,24 @@ function render() {{
 
         }});
 
-    rowCount.innerText =
-        rows.length;
+    tbody.innerHTML='';
 
-    tbody.innerHTML = '';
-
-    rows.forEach(r => {{
+    rows.forEach(r=>{{
 
         const tr =
             document.createElement(
                 'tr'
+            );
+
+        tr.className =
+            'clickable';
+
+        tr.onclick =
+            () => showDetails(
+                r.symbol,
+                r.regime,
+                r.strategy_family,
+                r.strength_bucket
             );
 
         tr.innerHTML = `
@@ -400,17 +467,12 @@ render();
 </html>
 """
 
-    output = Path(OUTPUT_HTML)
-
-    output.write_text(
+    Path(OUTPUT_HTML).write_text(
         html,
-        encoding="utf-8"
+        encoding="utf-8",
     )
 
-    print()
-    print("=" * 80)
-    print("Saved:", output)
-    print("=" * 80)
+    print("Saved:", OUTPUT_HTML)
 
 
 if __name__ == "__main__":
