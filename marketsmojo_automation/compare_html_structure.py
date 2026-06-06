@@ -5,7 +5,8 @@ import hashlib
 import json
 
 real_file = Path.home() / "Downloads" / "mojo.html"
-auto_file = sorted(Path("saved_pages").glob("marketsmojo_mojoscore_*.html"))[-1]
+auto_files = list(Path("saved_pages").glob("marketsmojo_mojoscore_*.html")) + list(Path("saved_pages").glob("marketsmojo_server_mojoscore_*.html"))
+auto_file = sorted(auto_files, key=lambda x: x.stat().st_mtime)[-1]
 
 def analyse(path):
     html = path.read_text(errors="ignore")
