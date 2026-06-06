@@ -83,9 +83,26 @@ with sync_playwright() as p:
 
     page.locator("text=Import").first.click()
 
-    page.wait_for_url("**/data/instrument_list", timeout=120000)
+    page.wait_for_timeout(5000)
 
-    print("UPLOAD_SUCCESS")
-    print("Final URL:", page.url)
+    for _ in range(120):
+        if "/data/instrument_list" in page.url:
+            print("UPLOAD_SUCCESS")
+            print("Final URL:", page.url)
+            break
+
+        body_text = page.inner_text("body") if page.locator("body").count() else ""
+
+        if "Internal Server Error" in body_text:
+            print("UPLOAD_FAILED_INTERNAL_SERVER_ERROR")
+            print("Final URL:", page.url)
+            page.screenshot(path="screenshots/eajee_upload_internal_server_error.png", full_page=True)
+            raise RuntimeError("Eajee returned Internal Server Error after import.")
+
+        page.wait_for_timeout(1000)
+
+    else:
+        page.screenshot(path="screenshots/eajee_upload_timeout.png", full_page=True)
+        raise RuntimeError(f"Upload did not reach instrument_list. Final URL: {page.url}")
 
     context.close()
