@@ -1,0 +1,11 @@
+
+# MarketsMojo / Eajee browser profiles and generated artifacts
+marketsmojo_automation/server_runner/profile/
+marketsmojo_automation/server_runner/profile_eajee/
+marketsmojo_automation/saved_pages/
+marketsmojo_automation/screenshots/
+
+server_runner/profile/
+server_runner/profile_eajee/
+saved_pages/
+screenshots/
