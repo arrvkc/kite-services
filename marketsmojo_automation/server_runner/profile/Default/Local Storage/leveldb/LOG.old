@@ -1,14 +1,9 @@
-2026/06/06-07:40:57.277 10b81 Reusing MANIFEST /Users/chakravarthi/kite_services/marketsmojo_automation/server_runner/profile/Default/Local Storage/leveldb/MANIFEST-000001
-2026/06/06-07:40:57.280 10b81 Recovering log #22
-2026/06/06-07:40:57.280 10b81 Level-0 table #25: started
-2026/06/06-07:40:57.293 10b81 Level-0 table #25: 26596 bytes OK
-2026/06/06-07:40:57.300 10b81 Delete type=0 #22
-2026/06/06-07:40:57.303 10b85 Compacting 4@0 + 1@1 files
-2026/06/06-07:40:57.306 10b85 Generated table #27@0: 17 keys, 14052 bytes
-2026/06/06-07:40:57.306 10b85 Compacted 4@0 + 1@1 files => 14052 bytes
-2026/06/06-07:40:57.307 10b85 compacted to: files[ 0 1 0 0 0 0 0 ]
-2026/06/06-07:40:57.308 10b85 Delete type=2 #14
-2026/06/06-07:40:57.308 10b85 Delete type=2 #16
-2026/06/06-07:40:57.308 10b85 Delete type=2 #20
-2026/06/06-07:40:57.308 10b85 Delete type=2 #23
-2026/06/06-07:40:57.308 10b85 Delete type=2 #25
+2026/06/06-09:50:51.051 27f96 Reusing MANIFEST /Users/chakravarthi/kite_services/marketsmojo_automation/server_runner/profile/Default/Local Storage/leveldb/MANIFEST-000001
+2026/06/06-09:50:51.053 27f96 Recovering log #26
+2026/06/06-09:50:51.053 27f96 Level-0 table #29: started
+2026/06/06-09:50:51.066 27f96 Level-0 table #29: 27039 bytes OK
+2026/06/06-09:50:51.066 27f96 Recovering log #30
+2026/06/06-09:50:51.067 27f96 Level-0 table #30: started
+2026/06/06-09:50:51.069 27f96 Level-0 table #30: 27503 bytes OK
+2026/06/06-09:50:51.075 27f96 Delete type=0 #26
+2026/06/06-09:50:51.076 27f96 Delete type=0 #30

@@ -1,3 +1,5 @@
-2026/06/06-07:48:38.487 12101 Reusing MANIFEST /Users/chakravarthi/kite_services/marketsmojo_automation/server_runner/profile/Default/Local Storage/leveldb/MANIFEST-000001
-2026/06/06-07:48:38.489 12101 Recovering log #26
-2026/06/06-07:48:38.490 12101 Reusing old log /Users/chakravarthi/kite_services/marketsmojo_automation/server_runner/profile/Default/Local Storage/leveldb/000026.log 
+2026/06/06-11:04:00.753 34fce Reusing MANIFEST /Users/chakravarthi/kite_services/marketsmojo_automation/server_runner/profile/Default/Local Storage/leveldb/MANIFEST-000001
+2026/06/06-11:04:00.755 34fce Recovering log #31
+2026/06/06-11:04:00.756 34fce Level-0 table #33: started
+2026/06/06-11:04:00.771 34fce Level-0 table #33: 14019 bytes OK
+2026/06/06-11:04:00.773 34fce Delete type=0 #31
