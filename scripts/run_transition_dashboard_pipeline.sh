@@ -9,7 +9,7 @@ set +a
 
 RUN_DATE=$(date +%F)
 
-python /opt/kite_services/engines/strategy_deterministic_engine/scripts/generate_transition_report_from_db.py \
+/opt/kite_services/venv/bin/python /opt/kite_services/engines/strategy_deterministic_engine/scripts/generate_transition_report_from_db.py \
   --run-date "$RUN_DATE" \
   --user-id OMK569
 

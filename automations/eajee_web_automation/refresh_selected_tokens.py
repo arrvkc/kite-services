@@ -3,7 +3,8 @@ import csv
 import os
 import smtplib
 from email.message import EmailMessage
-from time import strftime
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from .config import BASE_DIR
 
@@ -132,7 +133,7 @@ def build_html_report(rows, final_status):
         <h2>EAJEE Zerodha Token Refresh Report</h2>
 
         <p><b>Status:</b> {final_status}</p>
-        <p><b>Time:</b> {strftime("%Y-%m-%d %H:%M:%S")}</p>
+        <p><b>Time:</b> {datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%Y-%m-%d %H:%M:%S IST")}</p>
         <p><b>Total:</b> {len(rows)}</p>
         <p><b>Success:</b> {success_count}</p>
         <p><b>Failed:</b> {len(failed_rows)}</p>
