@@ -8,7 +8,10 @@ BASE = REPO_ROOT / "data" / "strategy_transition_reports"
 csv_path = BASE / "strategy_transition_scanner_latest.csv"
 html_path = BASE / "strategy_transition_report_latest.html"
 
-df = pd.read_csv(csv_path)
+try:
+    df = pd.read_csv(csv_path)
+except pd.errors.EmptyDataError:
+    df = pd.DataFrame()
 
 if df.empty:
     html_doc = "<h2>Strategy Transition Report</h2><p>No transitions found.</p>"

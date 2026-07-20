@@ -7,6 +7,9 @@ set -a
 . /opt/kite_services/.env
 set +a
 
+KITE_SERVICES_BASE_DIR="/opt/kite_services" \
+  source /opt/kite_services/scripts/runtime/configure_host_database_runtime.sh
+
 PYTHONPATH=.:services /opt/kite_services/venv/bin/python \
   engines/strategy_validation_engine/scripts/generate_fo_universe_validation_csv.py
 
@@ -25,8 +28,11 @@ PYTHONPATH=.:services /opt/kite_services/venv/bin/python \
 PYTHONPATH=.:services /opt/kite_services/venv/bin/python \
 engines/strategy_validation_engine/scripts/generate_validation_dashboard_payload.py
 
-mkdir -p /home/sivapanduri/instance/strategy_validation
+ATMS_INSTANCE_HOST_PATH="${ATMS_INSTANCE_HOST_PATH:-/srv/atms-platform/instance}"
+VALIDATION_DEST_DIR="$ATMS_INSTANCE_HOST_PATH/strategy_validation"
 
-cp \
+mkdir -p "$VALIDATION_DEST_DIR"
+
+install -m 0644 \
 /opt/kite_services/data/strategy_validation/validation_dashboard_payload.json \
-/home/sivapanduri/instance/strategy_validation/validation_dashboard_payload.json
+"$VALIDATION_DEST_DIR/validation_dashboard_payload.json"

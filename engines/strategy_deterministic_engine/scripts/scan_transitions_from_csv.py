@@ -16,6 +16,29 @@ from kiteconnect import KiteConnect  # noqa: E402
 from services.kite_credentials_service import get_kite_credentials  # noqa: E402
 
 
+BASE_OUTPUT_COLUMNS = [
+    "run_date",
+    "symbol",
+    "event_type",
+    "change_types",
+    "previous_regime_bucket",
+    "current_regime_bucket",
+    "previous_strategy_family",
+    "current_strategy_family",
+    "previous_strength",
+    "current_strength",
+    "strength_delta",
+    "previous_confidence",
+    "current_confidence",
+    "confidence_delta",
+    "previous_transition_state",
+    "current_transition_state",
+    "previous_include_in_top_n",
+    "current_include_in_top_n",
+    "reason_codes",
+]
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Scan strategy deterministic engine CSV for regime/strategy transitions."
@@ -230,7 +253,7 @@ def main() -> None:
                 }
             )
 
-    out = pd.DataFrame(rows)
+    out = pd.DataFrame(rows, columns=BASE_OUTPUT_COLUMNS)
 
     if out.empty:
         print("No meaningful transitions found.")

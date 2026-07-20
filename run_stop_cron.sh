@@ -17,6 +17,9 @@ set -a
 . "$APP_DIR/.env"
 set +a
 
+KITE_SERVICES_BASE_DIR="$APP_DIR" \
+  source "$APP_DIR/scripts/runtime/configure_host_database_runtime.sh"
+
 echo "==================================================" >> "$LOG_DIR/stop_cron_$RUN_DATE.log"
 echo "STOP CRON STARTED: $RUN_TS" >> "$LOG_DIR/stop_cron_$RUN_DATE.log"
 echo "==================================================" >> "$LOG_DIR/stop_cron_$RUN_DATE.log"
