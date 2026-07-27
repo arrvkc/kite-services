@@ -14,7 +14,19 @@ except pd.errors.EmptyDataError:
     df = pd.DataFrame()
 
 if df.empty:
-    html_doc = "<h2>Strategy Transition Report</h2><p>No transitions found.</p>"
+    html_doc = """<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+<title>Strategy Transition Report</title>
+</head>
+<body>
+<h2>Strategy Transition Report</h2>
+<p>No transitions found.</p>
+</body>
+</html>
+"""
     html_path.write_text(html_doc)
     print(f"Saved HTML report: {html_path}")
     raise SystemExit(0)
@@ -397,6 +409,7 @@ html_doc = f"""
 <html>
 <head>
 <meta charset="utf-8">
+<link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
 <title>Strategy Transition Report</title>
 <style>
 body {{

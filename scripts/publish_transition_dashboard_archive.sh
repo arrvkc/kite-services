@@ -30,6 +30,7 @@ cat <<HTML
 <html>
 <head>
 <meta charset="utf-8">
+<link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
 <title>Strategy Transition Report Archive</title>
 </head>
 <body>
