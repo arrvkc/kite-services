@@ -46,7 +46,7 @@ echo "==================================================" >> "$MASTER_LOG"
   echo "--------------------------------------------------"
 
   set +e
-  docker exec "$ATMS_CONTAINER" sh -lc "mkdir -p ./logs/fetch_52w && ATMS_FETCH52W_LOG_DIR=./logs/fetch_52w python $CMD_PATH fetch-52w-cmd --file-for BOTH" > "$CONTAINER_LOG" 2>&1
+  docker exec "$ATMS_CONTAINER" sh -lc "mkdir -p ./logs/fetch_52w && PYTHONPATH=/atms ATMS_FETCH52W_LOG_DIR=./logs/fetch_52w python $CMD_PATH fetch-52w-cmd --file-for BOTH" > "$CONTAINER_LOG" 2>&1
   EXIT_CODE=$?
   set -e
 

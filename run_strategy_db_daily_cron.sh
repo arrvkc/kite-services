@@ -17,6 +17,9 @@ set -a
 . "$APP_DIR/.env"
 set +a
 
+KITE_SERVICES_BASE_DIR="$APP_DIR" \
+  source "$APP_DIR/scripts/runtime/configure_host_database_runtime.sh"
+
 MASTER_LOG="$LOG_DIR/pipeline_$RUN_DATE.log"
 
 echo "==================================================" >> "$MASTER_LOG"

@@ -2,7 +2,8 @@
 set -euo pipefail
 
 SRC_DIR="/opt/kite_services/data/strategy_transition_reports"
-DEST_DIR="/home/sivapanduri/instance/reports/strategy-transition"
+ATMS_INSTANCE_HOST_PATH="${ATMS_INSTANCE_HOST_PATH:-/srv/atms-platform/instance}"
+DEST_DIR="$ATMS_INSTANCE_HOST_PATH/reports/strategy-transition"
 
 mkdir -p "$DEST_DIR"
 
@@ -29,6 +30,7 @@ cat <<HTML
 <html>
 <head>
 <meta charset="utf-8">
+<link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
 <title>Strategy Transition Report Archive</title>
 </head>
 <body>
