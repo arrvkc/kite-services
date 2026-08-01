@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import subprocess
+import sys
 from io import StringIO
 from pathlib import Path
 
@@ -91,7 +92,7 @@ def main() -> None:
     run_date = args.run_date or latest_run_date_from_export()
 
     scanner_cmd = [
-        "python",
+        sys.executable,
         str(REPO_ROOT / "engines" / "strategy_deterministic_engine" / "scripts" / "scan_transitions_from_csv.py"),
         "--input-csv",
         str(INPUT_CSV),
@@ -109,7 +110,7 @@ def main() -> None:
     subprocess.check_call(scanner_cmd)
 
     html_cmd = [
-        "python",
+        sys.executable,
         str(REPO_ROOT / "engines" / "strategy_deterministic_engine" / "scripts" / "generate_transition_html_report.py"),
     ]
 
