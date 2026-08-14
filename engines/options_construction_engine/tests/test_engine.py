@@ -191,3 +191,21 @@ def test_supplied_market_contract_accepts_exact_decimal_boundary_without_mutatio
     )
     assert result["construction_status"] in {STATUS_CONSTRUCTED, STATUS_REJECTED}
     assert chain == original
+
+
+def test_supplied_market_context_preserves_reviewed_runner_conventions():
+    from engines.options_construction_engine.contract import (
+        prepare_supplied_option_market_context,
+    )
+
+    chain = [
+        {"strike": Decimal("100"), "lot_size": 50, "tradingsymbol": "A"},
+        {"strike": Decimal("105"), "lot_size": 50, "tradingsymbol": "B"},
+        {"strike": Decimal("115"), "lot_size": 25, "tradingsymbol": "C"},
+    ]
+    original = copy.deepcopy(chain)
+    prepared = prepare_supplied_option_market_context(chain)
+    assert prepared["strike_step"] == Decimal("5")
+    assert prepared["lot_size"] == 50
+    assert [item["tradingsymbol"] for item in prepared["option_chain"]] == ["A", "B"]
+    assert chain == original

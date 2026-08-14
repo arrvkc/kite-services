@@ -7,6 +7,7 @@ unchanged financial rules to :class:`OptionsConstructionEngine`.
 
 from __future__ import annotations
 
+from collections import Counter
 from copy import deepcopy
 from decimal import Decimal
 from typing import Any, Mapping, Sequence
@@ -16,6 +17,47 @@ from .models import OptionsConstructionConfig
 
 
 CONTRACT_IDENTITY = "EAJEE_OPTIONS_CONSTRUCTION_SUPPLIED_MARKET_FACTS"
+
+
+def prepare_supplied_option_market_context(
+    option_chain: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Expose the reviewed runner's strike-step and lot-size conventions.
+
+    This is a pure extraction of its existing supplied-chain preparation:
+    minimum positive listed-strike interval, dominant positive lot size, and
+    filtering to that lot size. No quote is fetched and no threshold changes.
+    """
+    if not isinstance(option_chain, Sequence):
+        raise TypeError("Supplied option chain must use a sequence contract.")
+    chain = deepcopy([dict(item) for item in option_chain])
+    strikes = sorted({
+        Decimal(str(item["strike"]))
+        for item in chain
+        if item.get("strike") is not None and Decimal(str(item["strike"])) > 0
+    })
+    if len(strikes) < 2:
+        raise ValueError("Not enough listed strikes to infer strike_step.")
+    strike_steps = [
+        upper - lower
+        for lower, upper in zip(strikes, strikes[1:])
+        if upper > lower
+    ]
+    lot_counts = Counter(
+        int(item["lot_size"])
+        for item in chain
+        if item.get("lot_size") is not None and int(item["lot_size"]) > 0
+    )
+    if not lot_counts:
+        raise ValueError("No positive lot_size found in supplied option chain.")
+    lot_size = lot_counts.most_common(1)[0][0]
+    return {
+        "strike_step": min(strike_steps),
+        "lot_size": lot_size,
+        "option_chain": tuple(
+            item for item in chain if int(item.get("lot_size") or 0) == lot_size
+        ),
+    }
 
 
 def _engine_value(value: Any) -> Any:
