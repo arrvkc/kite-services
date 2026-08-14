@@ -3,8 +3,13 @@ from __future__ import annotations
 import copy
 import json
 from pathlib import Path
+from decimal import Decimal
 
 from engines.options_construction_engine.constants import *
+from engines.options_construction_engine.contract import (
+    CONTRACT_IDENTITY,
+    construct_from_supplied_market_facts,
+)
 from engines.options_construction_engine.engine import OptionsConstructionEngine
 from engines.options_construction_engine.models import OptionsConstructionConfig
 
@@ -158,3 +163,31 @@ def test_deterministic_output_identical_for_identical_inputs():
     first = engine.construct(copy.deepcopy(fixture), copy.deepcopy(chain))
     second = engine.construct(copy.deepcopy(fixture), copy.deepcopy(chain))
     assert first == second
+
+
+def test_supplied_market_contract_is_golden_equivalent_to_reviewed_engine():
+    fixture = load_reference()
+    chain = fixture.pop("option_chain")
+    config = OptionsConstructionConfig(reference_fixture_compatibility=True)
+    expected = OptionsConstructionEngine(config).construct(
+        copy.deepcopy(fixture), copy.deepcopy(chain)
+    )
+    actual = construct_from_supplied_market_facts(fixture, chain, config=config)
+    assert CONTRACT_IDENTITY == "EAJEE_OPTIONS_CONSTRUCTION_SUPPLIED_MARKET_FACTS"
+    assert actual == expected
+
+
+def test_supplied_market_contract_accepts_exact_decimal_boundary_without_mutation():
+    fixture = load_reference()
+    chain = fixture.pop("option_chain")
+    fixture["underlying_spot_price"] = Decimal(str(fixture["underlying_spot_price"]))
+    fixture["strike_step"] = Decimal(str(fixture["strike_step"]))
+    chain[0]["bid_price"] = Decimal(str(chain[0]["bid_price"]))
+    original = copy.deepcopy(chain)
+    result = construct_from_supplied_market_facts(
+        fixture,
+        chain,
+        config=OptionsConstructionConfig(reference_fixture_compatibility=True),
+    )
+    assert result["construction_status"] in {STATUS_CONSTRUCTED, STATUS_REJECTED}
+    assert chain == original
