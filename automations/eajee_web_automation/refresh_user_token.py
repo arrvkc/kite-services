@@ -2,12 +2,20 @@ import argparse
 import csv
 import traceback
 import time
+from urllib.parse import urlsplit
 
 from .browser import create_browser
 from .login import login_and_open_target
 from .config import BASE_DIR
 from .run_context import RUN_DIR, zip_run
 from .zerodha_login import complete_zerodha_login
+from .persisted_refresh_verification import (
+    DONE,
+    SUCCESS,
+    UNKNOWN_FINAL_STATE,
+    locate_target_user_state,
+    verify_persisted_refresh,
+)
 
 
 LOG_FILE = BASE_DIR / "logs" / "eajee_web_automation" / "refresh_token_results.csv"
@@ -86,10 +94,9 @@ def main():
         login_and_open_target(page)
 
         stage = "FIND_USER_ROW"
-        row = page.locator("tr", has_text=target_user_id).first
-
-        if row.count() == 0:
-            raise RuntimeError(f"User row not found: {target_user_id}")
+        pre_refresh_state = locate_target_user_state(page, target_user_id)
+        pre_refresh_updated_on = pre_refresh_state.updated_on
+        row = pre_refresh_state.row
 
         stage = "FIND_REFRESH_LINK"
         refresh_link = row.locator(
@@ -133,22 +140,35 @@ def main():
             )
 
         stage = "VERIFY_FINAL_RESULT"
+        status = UNKNOWN_FINAL_STATE
 
-        page.wait_for_timeout(2000)
+        try:
+            page.wait_for_url("**/data/users*", timeout=60000)
+            page.locator("#users-table").wait_for(
+                state="visible",
+                timeout=60000,
+            )
+        except Exception:
+            final_path = urlsplit(page.url).path or "/"
+            raise RuntimeError(
+                "Expected EAJEE users page state was not reached; "
+                f"current path is {final_path}"
+            ) from None
 
         final_text = page.locator("body").inner_text()
 
         (RUN_DIR / "final_page_text.txt").write_text(final_text)
 
-        if "Kite token updated" in final_text or "Success" in final_text:
-            status = "SUCCESS"
-        else:
-            status = "UNKNOWN_FINAL_STATE"
-            raise RuntimeError(
-                "Refresh flow completed, but success message was not found"
-            )
+        verification = verify_persisted_refresh(
+            page,
+            target_user_id,
+            pre_refresh_updated_on,
+        )
+        status = verification.status
+        if status != SUCCESS:
+            raise RuntimeError(verification.reason)
 
-        stage = "DONE"
+        stage = DONE
 
         print(f"SUCCESS: Token refresh completed for {target_user_id}")
         print(f"FINAL_URL={page.url}")
