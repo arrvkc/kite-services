@@ -1,4 +1,3 @@
-from .run_context import RUN_DIR
 import time
 
 from .config import (
@@ -8,6 +7,8 @@ from .config import (
     PASSWORD,
     SCREENSHOT_DIR,
 )
+from .diagnostic_urls import safe_url_for_log
+from .run_context import RUN_DIR
 
 
 def safe_screenshot(page, name):
@@ -18,7 +19,7 @@ def safe_screenshot(page, name):
 
 
 def login_and_open_target(page):
-    print(f"Opening login page: {LOGIN_URL}")
+    print(f"Opening login page: {safe_url_for_log(LOGIN_URL)}")
 
     page.goto(
         LOGIN_URL,
@@ -29,7 +30,7 @@ def login_and_open_target(page):
     safe_screenshot(page, "01_login_page")
 
     print("Page title:", page.title())
-    print("Current URL:", page.url)
+    print("Current URL:", safe_url_for_log(page.url))
 
     # Try common username selectors
     username_selectors = [
@@ -98,7 +99,7 @@ def login_and_open_target(page):
 
     safe_screenshot(page, "03_after_login")
 
-    print(f"Opening target page: {TARGET_URL}")
+    print(f"Opening target page: {safe_url_for_log(TARGET_URL)}")
 
     page.goto(
         TARGET_URL,
@@ -110,4 +111,4 @@ def login_and_open_target(page):
 
     safe_screenshot(page, "04_target_page")
 
-    print(f"SUCCESS CURRENT URL: {page.url}")
+    print(f"SUCCESS CURRENT URL: {safe_url_for_log(page.url)}")

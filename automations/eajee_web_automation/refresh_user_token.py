@@ -7,6 +7,7 @@ from urllib.parse import urlsplit
 from .browser import create_browser
 from .login import login_and_open_target
 from .config import BASE_DIR
+from .diagnostic_urls import safe_diagnostic_text, safe_url_for_log
 from .run_context import RUN_DIR, zip_run
 from .zerodha_login import complete_zerodha_login
 from .persisted_refresh_verification import (
@@ -47,18 +48,24 @@ def log_result(row):
         if not file_exists:
             writer.writeheader()
 
-        writer.writerow(row)
+        safe_row = dict(row)
+        safe_row["refresh_url"] = safe_url_for_log(row.get("refresh_url", ""))
+        safe_row["final_url"] = safe_url_for_log(row.get("final_url", ""))
+        safe_row["error"] = safe_diagnostic_text(row.get("error", ""))
+        writer.writerow(safe_row)
 
 
 def save_traceback(exc):
     traceback_file = RUN_DIR / "error_traceback.txt"
 
     traceback_file.write_text(
-        "".join(
-            traceback.format_exception(
-                type(exc),
-                exc,
-                exc.__traceback__,
+        safe_diagnostic_text(
+            "".join(
+                traceback.format_exception(
+                    type(exc),
+                    exc,
+                    exc.__traceback__,
+                )
             )
         )
     )
@@ -116,7 +123,7 @@ def main():
         )
 
         stage = "CLICK_REFRESH_LINK"
-        print(f"Clicking refresh link: {refresh_url}")
+        print(f"Clicking refresh link: {safe_url_for_log(refresh_url)}")
 
         with page.expect_navigation(timeout=60000):
             refresh_link.click()
@@ -130,7 +137,7 @@ def main():
             full_page=True,
         )
 
-        print(f"After refresh click URL: {final_url}")
+        print(f"After refresh click URL: {safe_url_for_log(final_url)}")
 
         if "kite.zerodha.com" in final_url:
             stage = "ZERODHA_LOGIN"
@@ -171,10 +178,10 @@ def main():
         stage = DONE
 
         print(f"SUCCESS: Token refresh completed for {target_user_id}")
-        print(f"FINAL_URL={page.url}")
+        print(f"FINAL_URL={safe_url_for_log(page.url)}")
 
     except Exception as exc:
-        error = str(exc)
+        error = safe_diagnostic_text(exc)
         traceback_file = save_traceback(exc)
 
         try:

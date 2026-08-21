@@ -1,6 +1,7 @@
 import pyotp
 
 from .credentials import get_zerodha_credentials
+from .diagnostic_urls import safe_url_for_log
 from .run_context import RUN_DIR
 
 
@@ -18,7 +19,7 @@ def complete_zerodha_login(page, user_id, artifact_dir=None):
     )
 
     print("Zerodha page title:", page.title())
-    print("Zerodha page URL:", page.url)
+    print("Zerodha page URL:", safe_url_for_log(page.url))
 
     page.fill("input#userid", creds["zerodha_user_id"])
     page.fill("input#password", creds["zerodha_password"])
@@ -63,6 +64,6 @@ def complete_zerodha_login(page, user_id, artifact_dir=None):
         full_page=True,
     )
 
-    print("After Zerodha login URL:", page.url)
+    print("After Zerodha login URL:", safe_url_for_log(page.url))
 
     return page.url
