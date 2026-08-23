@@ -217,7 +217,12 @@ class OptionsConstructionEngine:
 
         if not valid_after_pricing:
             code = first_pricing_code or NO_VALID_STRIKE_PAIR
-            output = self._rejected_output(strategy_payload, [expiry_code, mode_code, LIQUIDITY_CHECK_PASSED, code], [_error(code, "All generated candidates failed pricing or risk validation.")], expiry=expiry)
+            liquidity_pass_code = (
+                COMPLETED_SESSION_LIQUIDITY_CHECK_PASSED
+                if self._is_completed_session_historical()
+                else LIQUIDITY_CHECK_PASSED
+            )
+            output = self._rejected_output(strategy_payload, [expiry_code, mode_code, liquidity_pass_code, code], [_error(code, "All generated candidates failed pricing or risk validation.")], expiry=expiry)
             self._finalize_audit(audit, output, stage="stage_9_candidate_exhaustion")
             return output
 

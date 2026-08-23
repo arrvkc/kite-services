@@ -141,6 +141,13 @@ def test_completed_session_price_drives_existing_engine_economics():
     assert result["construction_result"]["max_profit_per_lot"] == 200.0
 
 
+def test_completed_session_pricing_rejection_keeps_historical_liquidity_provenance():
+    result = request(short_candles=[candle(1.5)], long_candles=[candle(1)])
+    assert result["status"] == STATUS_REJECTED
+    assert COMPLETED_SESSION_LIQUIDITY_CHECK_PASSED in result["reason_codes"]
+    assert "LIQUIDITY_CHECK_PASSED" not in result["reason_codes"]
+
+
 @pytest.mark.parametrize(
     ("short_candles", "reason"),
     [
