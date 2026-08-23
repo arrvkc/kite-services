@@ -67,6 +67,8 @@ def _money(value: float) -> float:
 
 
 def _spread_pct(contract: OptionContract) -> float:
+    if contract.bid_price is None or contract.ask_price is None:
+        return float("inf")
     mid = (contract.bid_price + contract.ask_price) / 2.0
     if mid <= 0:
         return float("inf")
@@ -104,11 +106,18 @@ class OptionsConstructionEngine:
 
     def __init__(self, config: OptionsConstructionConfig | None = None) -> None:
         self.config = config or OptionsConstructionConfig()
-        if self.config.liquidity_mode not in {"LIVE_STRICT", "AFTER_HOURS_HISTORICAL"}:
-            raise ValueError("liquidity_mode must be LIVE_STRICT or AFTER_HOURS_HISTORICAL")
+        if self.config.liquidity_mode not in {
+            LIQUIDITY_MODE_LIVE_STRICT,
+            LIQUIDITY_MODE_AFTER_HOURS_HISTORICAL,
+            LIQUIDITY_MODE_COMPLETED_SESSION_HISTORICAL,
+        }:
+            raise ValueError("liquidity_mode is unsupported")
 
     def _is_after_hours_historical(self) -> bool:
-        return self.config.liquidity_mode == "AFTER_HOURS_HISTORICAL"
+        return self.config.liquidity_mode == LIQUIDITY_MODE_AFTER_HOURS_HISTORICAL
+
+    def _is_completed_session_historical(self) -> bool:
+        return self.config.liquidity_mode == LIQUIDITY_MODE_COMPLETED_SESSION_HISTORICAL
 
     # Section 20 public orchestration.
     def construct(self, strategy_result_or_payload: dict[str, Any], option_chain: list[dict[str, Any]]) -> dict[str, Any]:
@@ -168,7 +177,10 @@ class OptionsConstructionEngine:
         first_liquidity_code: Optional[str] = None
         for candidate in candidates:
             code, diagnostics = self._liquidity_code(candidate)
-            if code == LIQUIDITY_CHECK_PASSED:
+            if code in {
+                LIQUIDITY_CHECK_PASSED,
+                COMPLETED_SESSION_LIQUIDITY_CHECK_PASSED,
+            }:
                 liquidity_passed_any = True
                 valid_after_liquidity.append(candidate)
             else:
@@ -237,9 +249,19 @@ class OptionsConstructionEngine:
             for s in scored
         ]
         selected = self._rank_scored(scored)[0]
-        reason_codes = [expiry_code, mode_code, LIQUIDITY_CHECK_PASSED]
+        reason_codes = [
+            expiry_code,
+            mode_code,
+            (
+                COMPLETED_SESSION_LIQUIDITY_CHECK_PASSED
+                if self._is_completed_session_historical()
+                else LIQUIDITY_CHECK_PASSED
+            ),
+        ]
         if self._is_after_hours_historical():
             reason_codes.append("AFTER_HOURS_HISTORICAL_PRICE_MODE")
+        elif self._is_completed_session_historical():
+            reason_codes.append(COMPLETED_SESSION_HISTORICAL_PRICE_MODE)
         reason_codes.extend([PREMIUM_CHECK_PASSED, CONSTRUCTION_SUCCESS])
         output = self._success_output(strategy_payload, selected, reason_codes)
 
@@ -274,6 +296,10 @@ class OptionsConstructionEngine:
                     "volume-positive historical candle close as bid/ask proxy, and the engine "
                     "forces execution_ready=false."
                     if self.config.liquidity_mode == "AFTER_HOURS_HISTORICAL" else None
+                ),
+                "completed_session_contract": (
+                    COMPLETED_SESSION_EVIDENCE_VERSION
+                    if self._is_completed_session_historical() else None
                 ),
             },
             "candidate_lists": {"generated": [], "ordered_before_filters": [], "after_liquidity": [], "after_pricing_and_risk": [], "scored": []},
@@ -320,16 +346,34 @@ class OptionsConstructionEngine:
                 oi = raw.get("open_interest")
                 volume = raw.get("volume")
                 ts = raw.get("data_timestamp")
+                historical_reference_price = raw.get("historical_reference_price")
                 if not tradingsymbol or instrument_token is None or _parse_date(expiry) is None:
                     raise ValueError("missing tradingsymbol/instrument_token/expiry")
                 if not _is_finite_number(strike) or float(strike) <= 0:
                     raise ValueError("invalid strike")
                 if option_type not in {OPTION_CE, OPTION_PE}:
                     raise ValueError("invalid option_type")
-                if not all(_is_finite_number(v) and float(v) >= 0 for v in [bid, ask, last]):
-                    raise ValueError("invalid bid/ask/last")
-                if not isinstance(oi, int) or oi < 0 or not isinstance(volume, int) or volume < 0:
-                    raise ValueError("invalid oi/volume")
+                if self._is_completed_session_historical():
+                    if bid is not None or ask is not None:
+                        raise ValueError("completed-session evidence cannot contain bid/ask")
+                    if last is not None and (
+                        not _is_finite_number(last) or float(last) < 0
+                    ):
+                        raise ValueError("invalid last price")
+                    if historical_reference_price is not None and (
+                        not _is_finite_number(historical_reference_price)
+                        or float(historical_reference_price) <= 0
+                    ):
+                        raise ValueError("invalid historical reference price")
+                    if oi is not None and (not isinstance(oi, int) or oi < 0):
+                        raise ValueError("invalid historical oi")
+                    if volume is not None and (not isinstance(volume, int) or volume < 0):
+                        raise ValueError("invalid historical volume")
+                else:
+                    if not all(_is_finite_number(v) and float(v) >= 0 for v in [bid, ask, last]):
+                        raise ValueError("invalid bid/ask/last")
+                    if not isinstance(oi, int) or oi < 0 or not isinstance(volume, int) or volume < 0:
+                        raise ValueError("invalid oi/volume")
                 if _parse_datetime(ts) is None:
                     raise ValueError("invalid data_timestamp")
                 delta = raw.get("delta")
@@ -343,11 +387,11 @@ class OptionsConstructionEngine:
                     expiry=str(_parse_date(expiry)),
                     strike=float(strike),
                     option_type=option_type,
-                    bid_price=float(bid),
-                    ask_price=float(ask),
-                    last_price=float(last),
-                    open_interest=int(oi),
-                    volume=int(volume),
+                    bid_price=None if bid is None else float(bid),
+                    ask_price=None if ask is None else float(ask),
+                    last_price=0.0 if last is None else float(last),
+                    open_interest=None if oi is None else int(oi),
+                    volume=None if volume is None else int(volume),
                     delta=delta,
                     data_timestamp=str(ts),
                     underlying=raw.get("underlying"),
@@ -355,6 +399,13 @@ class OptionsConstructionEngine:
                     delta_source=raw.get("delta_source"),
                     delta_timestamp=raw.get("delta_timestamp"),
                     delta_source_verified=raw.get("delta_source_verified"),
+                    historical_reference_price=(
+                        None if historical_reference_price is None
+                        else float(historical_reference_price)
+                    ),
+                    historical_last_trade_at=raw.get("historical_last_trade_at"),
+                    historical_session_identity=raw.get("historical_session_identity"),
+                    historical_oi_at=raw.get("historical_oi_at"),
                 ))
             except Exception as exc:
                 return OPTION_CHAIN_MISSING, [_error(OPTION_CHAIN_MISSING, f"Invalid option contract at index {idx}: {exc}")]
@@ -371,13 +422,23 @@ class OptionsConstructionEngine:
         timestamps = {c.data_timestamp for c in contracts}
         audit["input_snapshot"]["freshness_metadata"] = {"data_timestamps": sorted(timestamps), "freshness_policy": self.config.freshness_policy}
 
-        if not self._is_after_hours_historical():
+        if not self._is_after_hours_historical() and not self._is_completed_session_historical():
             for c in contracts:
                 ts = _parse_datetime(c.data_timestamp)
                 if ts is None or abs((asof - ts).total_seconds()) > self.config.live_freshness_seconds:
                     return OPTION_CHAIN_STALE, [_error(OPTION_CHAIN_STALE, "option-chain data violates active freshness policy.")]
             if len(timestamps) > 1:
                 return OPTION_CHAIN_STALE, [_error(OPTION_CHAIN_STALE, "option-chain contracts have inconsistent timestamps.")]
+
+        if self._is_completed_session_historical():
+            sessions = {c.historical_session_identity for c in contracts}
+            if None in sessions or len(sessions) != 1 or len(timestamps) != 1:
+                return HISTORICAL_SESSION_EVIDENCE_INCOMPLETE, [
+                    _error(
+                        HISTORICAL_SESSION_EVIDENCE_INCOMPLETE,
+                        "Completed-session option evidence must use one session identity.",
+                    )
+                ]
 
         for c in contracts:
             if c.underlying is not None and str(c.underlying).upper() != expected_instrument:
@@ -602,9 +663,13 @@ class OptionsConstructionEngine:
         return target - step - 1e-9 <= width <= target + step + 1e-9
 
     def _candidate(self, family: str, expiry: str, legs: tuple[CandidateLeg, ...], target_deviation: float, fit_values: dict[str, Any]) -> Candidate:
-        avg_spread = sum(_spread_pct(leg.contract) for leg in legs) / len(legs)
-        oi = sum(leg.contract.open_interest for leg in legs)
-        vol = sum(leg.contract.volume for leg in legs)
+        avg_spread = (
+            None
+            if self._is_completed_session_historical()
+            else sum(_spread_pct(leg.contract) for leg in legs) / len(legs)
+        )
+        oi = sum((leg.contract.open_interest or 0) for leg in legs)
+        vol = sum((leg.contract.volume or 0) for leg in legs)
         symbols = tuple(leg.contract.tradingsymbol for leg in legs)
         return Candidate(
             candidate_id=_candidate_id(family, expiry, legs),
@@ -612,7 +677,7 @@ class OptionsConstructionEngine:
             expiry=expiry,
             legs=legs,
             target_deviation=float(target_deviation),
-            avg_bid_ask_spread_pct=float(avg_spread),
+            avg_bid_ask_spread_pct=(None if avg_spread is None else float(avg_spread)),
             combined_open_interest=oi,
             combined_volume=vol,
             ordered_tradingsymbol_tuple=symbols,
@@ -623,7 +688,8 @@ class OptionsConstructionEngine:
     def _sort_candidates_for_evaluation(self, candidates: list[Candidate]) -> list[Candidate]:
         return sorted(candidates, key=lambda c: (
             c.target_deviation,
-            c.avg_bid_ask_spread_pct,
+            c.avg_bid_ask_spread_pct is None,
+            c.avg_bid_ask_spread_pct or 0.0,
             -c.combined_open_interest,
             -c.combined_volume,
             c.ordered_tradingsymbol_tuple,
@@ -638,27 +704,54 @@ class OptionsConstructionEngine:
             BID_ASK_SPREAD_TOO_WIDE: 3,
             OPEN_INTEREST_TOO_LOW: 4,
             VOLUME_TOO_LOW: 5,
+            HISTORICAL_SESSION_PRICE_UNAVAILABLE: 1,
+            HISTORICAL_SESSION_EVIDENCE_INCOMPLETE: 2,
+            HISTORICAL_SESSION_OI_UNAVAILABLE: 3,
+            HISTORICAL_SESSION_OI_TOO_LOW: 4,
+            HISTORICAL_SESSION_VOLUME_TOO_LOW: 5,
         }
         for leg in candidate.legs:
             c = leg.contract
             failures: list[str] = []
-            if self._is_after_hours_historical():
+            if self._is_completed_session_historical():
+                if not c.historical_session_identity or not c.historical_last_trade_at:
+                    failures.append(HISTORICAL_SESSION_EVIDENCE_INCOMPLETE)
+                if c.historical_reference_price is None or c.historical_reference_price <= 0:
+                    failures.append(HISTORICAL_SESSION_PRICE_UNAVAILABLE)
+                if c.open_interest is None:
+                    failures.append(HISTORICAL_SESSION_OI_UNAVAILABLE)
+                elif c.open_interest < self.config.min_open_interest:
+                    failures.append(HISTORICAL_SESSION_OI_TOO_LOW)
+                if c.volume is None or c.volume < self.config.min_volume:
+                    failures.append(HISTORICAL_SESSION_VOLUME_TOO_LOW)
+            elif self._is_after_hours_historical():
                 diagnostics.append(f"{c.tradingsymbol}:AFTER_HOURS_HISTORICAL_PRICE_MODE")
-            if c.bid_price <= 0 or c.ask_price <= 0:
-                failures.append(LIQUIDITY_CHECK_FAILED)
-            if c.ask_price < c.bid_price:
-                failures.append(LIQUIDITY_CHECK_FAILED)
-            if not self.config.reference_fixture_compatibility and _spread_pct(c) > self.config.max_bid_ask_spread_pct:
-                failures.append(BID_ASK_SPREAD_TOO_WIDE)
-            if c.open_interest < self.config.min_open_interest:
-                failures.append(OPEN_INTEREST_TOO_LOW)
-            if c.volume < self.config.min_volume:
-                failures.append(VOLUME_TOO_LOW)
+            if not self._is_completed_session_historical():
+                if (
+                    c.bid_price is None or c.ask_price is None
+                    or c.bid_price <= 0 or c.ask_price <= 0
+                ):
+                    failures.append(LIQUIDITY_CHECK_FAILED)
+                elif c.ask_price < c.bid_price:
+                    failures.append(LIQUIDITY_CHECK_FAILED)
+                if not self.config.reference_fixture_compatibility and _spread_pct(c) > self.config.max_bid_ask_spread_pct:
+                    failures.append(BID_ASK_SPREAD_TOO_WIDE)
+                if c.open_interest is None or c.open_interest < self.config.min_open_interest:
+                    failures.append(OPEN_INTEREST_TOO_LOW)
+                if c.volume is None or c.volume < self.config.min_volume:
+                    failures.append(VOLUME_TOO_LOW)
             diagnostics.extend(f"{c.tradingsymbol}:{f}" for f in failures)
             for f in failures:
                 if primary is None or priorities[f] < priorities[primary]:
                     primary = f
-        return (primary or LIQUIDITY_CHECK_PASSED), diagnostics
+        if primary is not None:
+            return primary, diagnostics
+        return (
+            COMPLETED_SESSION_LIQUIDITY_CHECK_PASSED
+            if self._is_completed_session_historical()
+            else LIQUIDITY_CHECK_PASSED,
+            diagnostics,
+        )
 
     # Section 11 / Section 17 Stages 7-8.
     def _price_and_risk(self, payload: dict[str, Any], candidate: Candidate) -> tuple[Optional[CandidateEconomics], str]:
@@ -667,7 +760,19 @@ class OptionsConstructionEngine:
 
         sells = [leg.contract for leg in candidate.legs if leg.side == SIDE_SELL]
         buys = [leg.contract for leg in candidate.legs if leg.side == SIDE_BUY]
-        net_credit = sum(c.bid_price for c in sells) - sum(c.ask_price for c in buys)
+        sell_prices = [
+            c.historical_reference_price
+            if self._is_completed_session_historical() else c.bid_price
+            for c in sells
+        ]
+        buy_prices = [
+            c.historical_reference_price
+            if self._is_completed_session_historical() else c.ask_price
+            for c in buys
+        ]
+        if any(value is None for value in sell_prices + buy_prices):
+            return None, INVALID_NET_PREMIUM
+        net_credit = sum(sell_prices) - sum(buy_prices)
 
         if family in {FAMILY_BEAR_CALL_SPREAD, FAMILY_BULL_PUT_SPREAD}:
             short = next(leg.contract for leg in candidate.legs if leg.role == ROLE_SHORT_LEG)
@@ -685,7 +790,7 @@ class OptionsConstructionEngine:
             return CandidateEconomics(net_credit, width, max_loss, max_profit, max_loss * lot_size, max_profit * lot_size, rr), PREMIUM_CHECK_PASSED
 
         if family in {FAMILY_BULL_CALL_SPREAD, FAMILY_BEAR_PUT_SPREAD}:
-            net_debit = sum(c.ask_price for c in buys) - sum(c.bid_price for c in sells)
+            net_debit = sum(buy_prices) - sum(sell_prices)
             long = next(leg.contract for leg in candidate.legs if leg.role == ROLE_LONG_LEG)
             short = next(leg.contract for leg in candidate.legs if leg.role == ROLE_SHORT_LEG)
             width = abs(short.strike - long.strike)
@@ -728,7 +833,14 @@ class OptionsConstructionEngine:
             c = leg.contract
             oi_score = _clip01(c.open_interest / 2000.0)
             vol_score = _clip01(c.volume / 500.0)
-            quote_score = 1.0 if c.bid_price > 0 and c.ask_price > 0 and c.ask_price >= c.bid_price else 0.0
+            quote_score = (
+                0.0
+                if self._is_completed_session_historical()
+                else 1.0
+                if c.bid_price is not None and c.ask_price is not None
+                and c.bid_price > 0 and c.ask_price > 0 and c.ask_price >= c.bid_price
+                else 0.0
+            )
             leg_scores.append(0.50 * oi_score + 0.30 * vol_score + 0.20 * quote_score)
         liquidity_score = sum(leg_scores) / len(leg_scores)
 
@@ -756,7 +868,13 @@ class OptionsConstructionEngine:
         else:
             reward_risk_score = _clip01((econ.net_premium / econ.width_value) / 0.35)
 
-        bid_ask_quality_score = 1 - _clip01(candidate.avg_bid_ask_spread_pct / self.config.max_bid_ask_spread_pct)
+        bid_ask_quality_score = (
+            0.0
+            if candidate.avg_bid_ask_spread_pct is None
+            else 1 - _clip01(
+                candidate.avg_bid_ask_spread_pct / self.config.max_bid_ask_spread_pct
+            )
+        )
         expiry_fit_score = 1.0 if candidate.expiry == expiry else 0.0
 
         score = round(100 * _clip01(
@@ -778,7 +896,8 @@ class OptionsConstructionEngine:
         return sorted(scored, key=lambda s: (
             -s.construction_score,
             -s.liquidity_score,
-            s.candidate.avg_bid_ask_spread_pct,
+            s.candidate.avg_bid_ask_spread_pct is None,
+            s.candidate.avg_bid_ask_spread_pct or 0.0,
             s.candidate.target_deviation,
             -s.reward_risk_score,
             s.economics.max_loss_per_lot,
@@ -806,6 +925,31 @@ class OptionsConstructionEngine:
 
     # Section 15.
     def _success_output(self, payload: dict[str, Any], selected: ScoredCandidate, reason_codes: list[str]) -> dict[str, Any]:
+        legs = []
+        for leg in selected.candidate.legs:
+            leg_output = {
+                "role": leg.role,
+                "side": leg.side,
+                "option_type": leg.contract.option_type,
+                "strike": int(leg.contract.strike) if leg.contract.strike.is_integer() else leg.contract.strike,
+                "expiry": leg.contract.expiry,
+                "tradingsymbol": leg.contract.tradingsymbol,
+                "instrument_token": leg.contract.instrument_token,
+                "bid_price": (
+                    None if leg.contract.bid_price is None
+                    else _money(leg.contract.bid_price)
+                ),
+                "ask_price": (
+                    None if leg.contract.ask_price is None
+                    else _money(leg.contract.ask_price)
+                ),
+            }
+            if self._is_completed_session_historical():
+                leg_output["historical_reference_price"] = (
+                    None if leg.contract.historical_reference_price is None
+                    else _money(leg.contract.historical_reference_price)
+                )
+            legs.append(leg_output)
         return {
             "spec_identifier": SPEC_IDENTIFIER,
             "instrument": payload["instrument"],
@@ -813,25 +957,15 @@ class OptionsConstructionEngine:
             "strategy_family": payload["strategy_family"],
             "contract_month_selection": payload["contract_month_selection"],
             "expiry": selected.candidate.expiry,
-            "legs": [
-                {
-                    "role": leg.role,
-                    "side": leg.side,
-                    "option_type": leg.contract.option_type,
-                    "strike": int(leg.contract.strike) if leg.contract.strike.is_integer() else leg.contract.strike,
-                    "expiry": leg.contract.expiry,
-                    "tradingsymbol": leg.contract.tradingsymbol,
-                    "instrument_token": leg.contract.instrument_token,
-                    "bid_price": _money(leg.contract.bid_price),
-                    "ask_price": _money(leg.contract.ask_price),
-                }
-                for leg in selected.candidate.legs
-            ],
+            "legs": legs,
             "net_premium": _money(selected.economics.net_premium),
             "max_loss_per_lot": _money(selected.economics.max_loss_per_lot),
             "max_profit_per_lot": _money(selected.economics.max_profit_per_lot),
             "construction_score": selected.construction_score,
-            "execution_ready": False if self._is_after_hours_historical() else True,
+            "execution_ready": False if (
+                self._is_after_hours_historical()
+                or self._is_completed_session_historical()
+            ) else True,
             "construction_status": STATUS_CONSTRUCTED,
             "reason_codes": _unique(reason_codes),
             "errors": [],

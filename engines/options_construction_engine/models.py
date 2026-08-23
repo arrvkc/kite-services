@@ -12,7 +12,8 @@ class OptionsConstructionConfig:
 
     # Pricing/liquidity mode
     # LIVE_STRICT = locked-spec live bid/ask mode
-    # AFTER_HOURS_HISTORICAL = non-production test mode using Kite historical last volume-positive candle close
+    # AFTER_HOURS_HISTORICAL = legacy non-production diagnostic mode.
+    # COMPLETED_SESSION_HISTORICAL = one reconstructible completed-session observation.
     liquidity_mode: str = "LIVE_STRICT"
 
     # Section 5
@@ -46,11 +47,11 @@ class OptionContract:
     expiry: str
     strike: float
     option_type: str
-    bid_price: float
-    ask_price: float
+    bid_price: Optional[float]
+    ask_price: Optional[float]
     last_price: float
-    open_interest: int
-    volume: int
+    open_interest: Optional[int]
+    volume: Optional[int]
     delta: Optional[float]
     data_timestamp: str
     underlying: Optional[str] = None
@@ -58,6 +59,10 @@ class OptionContract:
     delta_source: Optional[str] = None
     delta_timestamp: Optional[str] = None
     delta_source_verified: Optional[bool] = None
+    historical_reference_price: Optional[float] = None
+    historical_last_trade_at: Optional[str] = None
+    historical_session_identity: Optional[str] = None
+    historical_oi_at: Optional[str] = None
 
 @dataclass(frozen=True)
 class CandidateLeg:
@@ -72,7 +77,7 @@ class Candidate:
     expiry: str
     legs: tuple[CandidateLeg, ...]
     target_deviation: float
-    avg_bid_ask_spread_pct: float
+    avg_bid_ask_spread_pct: Optional[float]
     combined_open_interest: int
     combined_volume: int
     ordered_tradingsymbol_tuple: tuple[str, ...]
