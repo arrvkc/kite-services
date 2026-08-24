@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date, datetime, time
 from typing import Any, Dict, List
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 from kiteconnect import KiteConnect
@@ -38,16 +40,34 @@ class EquityTrendHistoryRunner:
         history_days: int,
         daily_lookback_days: int = 900,
         hourly_lookback_days: int = 120,
+        end_date: date | str | None = None,
     ) -> TrendHistoryResult:
         if history_days <= 0:
             raise ValueError("history_days must be positive.")
 
         # Keep this only for discovering the last N trading-day cut points.
-        raw_bars, _ = self.equity_runner.build_raw_bars_for_symbol(
-            symbol=symbol,
-            daily_lookback_days=30,
-            hourly_lookback_days=hourly_lookback_days,
-        )
+        # Historical recovery must bound this discovery before selecting the
+        # final N sessions; otherwise today's latest candles contaminate an
+        # earlier run date.
+        target_date = date.fromisoformat(end_date) if isinstance(end_date, str) else end_date
+        if target_date is None:
+            raw_bars, _ = self.equity_runner.build_raw_bars_for_symbol(
+                symbol=symbol,
+                daily_lookback_days=30,
+                hourly_lookback_days=hourly_lookback_days,
+            )
+        else:
+            target_end = datetime.combine(
+                target_date,
+                time.max,
+                tzinfo=ZoneInfo("Asia/Kolkata"),
+            )
+            raw_bars, _ = self.equity_runner.build_raw_bars_for_symbol_asof(
+                symbol=symbol,
+                asof_time=target_end,
+                daily_lookback_days=30,
+                hourly_lookback_days=hourly_lookback_days,
+            )
 
         hourly = raw_bars["hourly"].copy()
         hourly["timestamp"] = pd.to_datetime(hourly["timestamp"], utc=True)
@@ -66,6 +86,16 @@ class EquityTrendHistoryRunner:
             raise RuntimeError(f"No daily evaluation cut points available for {symbol}.")
 
         selected_cut_points = daily_cut_points[-history_days:]
+        if target_date is not None:
+            last_session_date = (
+                pd.Timestamp(selected_cut_points[-1])
+                .tz_convert("Asia/Kolkata")
+                .date()
+            )
+            if last_session_date != target_date:
+                raise RuntimeError(
+                    f"No completed market session found for {symbol.upper()} on {target_date}."
+                )
 
         rows: List[Dict[str, Any]] = []
         last_result: Dict[str, Any] | None = None

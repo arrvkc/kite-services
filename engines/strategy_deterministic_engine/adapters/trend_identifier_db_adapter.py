@@ -11,10 +11,17 @@ from engines.strategy_deterministic_engine.adapters.trend_identifier_batch_adapt
 
 
 class TrendIdentifierDbAdapter:
-    def __init__(self, engine, run_date: date, history_days: int = 5):
+    def __init__(
+        self,
+        engine,
+        run_date: date,
+        history_days: int = 5,
+        require_exact_contract_snapshot: bool = False,
+    ):
         self.engine = engine
         self.run_date = run_date
         self.history_days = history_days
+        self.require_exact_contract_snapshot = require_exact_contract_snapshot
 
     def _fetch_dataframe(self, sql: str, params: dict) -> pd.DataFrame:
         with self.engine.connect() as conn:
@@ -53,8 +60,9 @@ class TrendIdentifierDbAdapter:
             },
         )
 
+        comparison = "=" if self.require_exact_contract_snapshot else "<="
         contract_df = self._fetch_dataframe(
-            """
+            f"""
             SELECT DISTINCT ON (symbol)
                 symbol,
                 selection_date,
@@ -64,7 +72,7 @@ class TrendIdentifierDbAdapter:
                 next_month_available,
                 dte_next_month
             FROM contract_snapshot_fo_universe
-            WHERE selection_date <= :run_date
+            WHERE selection_date {comparison} :run_date
             ORDER BY symbol, selection_date DESC
             """,
             {"run_date": self.run_date},

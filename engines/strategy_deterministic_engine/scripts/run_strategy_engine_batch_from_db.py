@@ -9,6 +9,7 @@ from typing import Dict, Iterable, List, Sequence
 from engines.strategy_deterministic_engine.adapters.trend_identifier_db_adapter import TrendIdentifierDbAdapter
 from engines.strategy_deterministic_engine.db.postgres import get_engine
 from engines.strategy_deterministic_engine.db.upserts import (
+    clear_strategy_batch_results_for_run_date,
     complete_strategy_run,
     create_or_restart_strategy_run,
     upsert_strategy_batch_result_rows,
@@ -28,6 +29,11 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--batch-size", type=int, default=500)
     parser.add_argument("--output-csv", default=None)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--require-exact-contract-snapshot",
+        action="store_true",
+        help="Reject fallback contract snapshots before a historical recovery run.",
+    )
     return parser
 
 
@@ -147,6 +153,7 @@ def main() -> None:
         engine=engine,
         run_date=run_date,
         history_days=args.history_days,
+        require_exact_contract_snapshot=args.require_exact_contract_snapshot,
     )
     strategy_inputs = adapter.build_all()
     batch_result = evaluate_batch(strategy_inputs)
@@ -235,6 +242,7 @@ def main() -> None:
         for row in db_rows:
             row["run_id"] = run_id
 
+        cleared = clear_strategy_batch_results_for_run_date(conn, run_date)
         written = upsert_strategy_batch_result_rows(
             conn=conn,
             rows=db_rows,
@@ -251,6 +259,7 @@ def main() -> None:
         )
 
     print("")
+    print(f"CLEARED stale strategy_deterministic_engine_batch_results rows={cleared}")
     print(f"UPSERTED strategy_deterministic_engine_batch_results rows={written}")
     print(f"COMPLETED strategy_deterministic_engine_runs run_id={run_id}")
     print(f"Invalid evaluations excluded from ranking: {len(invalid_evaluations)}")

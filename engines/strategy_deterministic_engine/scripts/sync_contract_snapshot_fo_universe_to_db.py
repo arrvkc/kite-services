@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import argparse
-from datetime import date
+from datetime import date, datetime, time
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 from kiteconnect import KiteConnect
@@ -23,12 +24,31 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("user_id", help="Zerodha user id used to fetch Kite credentials")
     parser.add_argument("--batch-size", type=int, default=500)
     parser.add_argument("--symbols", help="Optional comma-separated symbols for testing")
+    parser.add_argument(
+        "--selection-date",
+        help="Build the snapshot exactly as of this date (YYYY-MM-DD).",
+    )
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="Return non-zero if any requested symbol cannot be reconstructed.",
+    )
     parser.add_argument("--dry-run", action="store_true")
     return parser
 
 
 def main() -> None:
     args = build_argument_parser().parse_args()
+    selection_date = date.fromisoformat(args.selection_date) if args.selection_date else None
+    explicit_asof = (
+        datetime.combine(
+            selection_date,
+            time(hour=15, minute=30),
+            tzinfo=ZoneInfo("Asia/Kolkata"),
+        )
+        if selection_date is not None
+        else None
+    )
 
     api_key, access_token = get_kite_credentials(args.user_id)
     kite = KiteConnect(api_key=api_key)
@@ -46,17 +66,19 @@ def main() -> None:
 
     for index, symbol in enumerate(symbols, start=1):
         try:
-            latest_payload = adapter._build_latest_payload(symbol)
+            asof_time = explicit_asof
+            if asof_time is None:
+                asof_time = adapter._build_latest_payload(symbol).asof_time
             contract_info = adapter.get_contract_info_for_symbol(
                 symbol,
-                latest_payload.asof_time,
+                asof_time,
             )
 
             rows.append(
                 {
                     "user_id": args.user_id,
                     "symbol": symbol,
-                    "selection_date": to_ist_date(latest_payload.asof_time),
+                    "selection_date": selection_date or to_ist_date(asof_time),
                     "near_expiry": contract_info.near_expiry,
                     "next_expiry": contract_info.next_expiry,
                     "dte_near_month": contract_info.dte_near_month,
@@ -68,12 +90,20 @@ def main() -> None:
             print(f"[{index}/{len(symbols)}] OK {symbol}")
 
         except Exception as exc:
-            failures.append({"symbol": symbol, "error": str(exc)})
-            print(f"[{index}/{len(symbols)}] FAIL {symbol}: {exc}")
+            safe_error = type(exc).__name__
+            failures.append({"symbol": symbol, "error": safe_error})
+            print(f"[{index}/{len(symbols)}] FAIL {symbol}: {safe_error}")
 
     if args.dry_run:
         print(f"DRY RUN: prepared_rows={len(rows)} failures={len(failures)}")
+        if failures and args.strict:
+            raise SystemExit(1)
         return
+
+    if failures and args.strict:
+        for failure in failures[:20]:
+            print(f"FAILURE {failure['symbol']}: {failure['error']}")
+        raise SystemExit(1)
 
     engine = get_engine()
     written = upsert_contract_snapshot_rows(engine, rows, batch_size=args.batch_size)
@@ -84,6 +114,8 @@ def main() -> None:
     if failures:
         for failure in failures[:20]:
             print(f"FAILURE {failure['symbol']}: {failure['error']}")
+        if args.strict:
+            raise SystemExit(1)
 
 
 if __name__ == "__main__":

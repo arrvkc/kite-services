@@ -237,6 +237,11 @@ DO UPDATE SET
     updated_at = now()
 """)
 
+DELETE_STRATEGY_BATCH_RESULTS_FOR_DATE_SQL = text("""
+DELETE FROM strategy_deterministic_engine_batch_results
+WHERE run_date = :run_date
+""")
+
 
 def create_or_restart_strategy_run(conn, run_date: date, generated_by_user_id: str | None) -> int:
     row = conn.execute(
@@ -247,6 +252,14 @@ def create_or_restart_strategy_run(conn, run_date: date, generated_by_user_id: s
         },
     ).fetchone()
     return int(row[0])
+
+
+def clear_strategy_batch_results_for_run_date(conn, run_date: date) -> int:
+    result = conn.execute(
+        DELETE_STRATEGY_BATCH_RESULTS_FOR_DATE_SQL,
+        {"run_date": run_date},
+    )
+    return int(result.rowcount or 0)
 
 
 def complete_strategy_run(
