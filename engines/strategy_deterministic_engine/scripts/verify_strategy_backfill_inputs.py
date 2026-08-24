@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter, defaultdict
 from datetime import date
 import json
 
@@ -21,19 +22,47 @@ def build_argument_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def build_trend_date_patterns(rows, run_date: date, history_days: int) -> list[dict]:
+    """Validate and summarize the exact per-symbol sessions used by the adapter."""
+    dates_by_symbol: dict[str, list[date]] = defaultdict(list)
+    for symbol, trade_date in rows:
+        dates_by_symbol[str(symbol)].append(trade_date)
+
+    invalid_symbols = []
+    pattern_counts: Counter[tuple[date, ...]] = Counter()
+    for symbol, trade_dates in dates_by_symbol.items():
+        ordered_dates = tuple(sorted(trade_dates))
+        if (
+            len(ordered_dates) != history_days
+            or len(set(ordered_dates)) != history_days
+            or ordered_dates[-1] != run_date
+            or any(item > run_date for item in ordered_dates)
+        ):
+            invalid_symbols.append(symbol)
+            continue
+        pattern_counts[ordered_dates] += 1
+
+    if invalid_symbols:
+        raise RuntimeError(
+            "Trend History contains incomplete, duplicate, or non-target sessions."
+        )
+    if not pattern_counts:
+        raise RuntimeError("Exact target-date Trend History has no session patterns.")
+
+    return [
+        {
+            "dates": [item.isoformat() for item in pattern],
+            "symbol_count": symbol_count,
+        }
+        for pattern, symbol_count in sorted(
+            pattern_counts.items(),
+            key=lambda item: (-item[1], item[0]),
+        )
+    ]
+
+
 def verify_inputs(engine, run_date: date, history_days: int = 5) -> dict:
     with engine.connect() as connection:
-        trend_dates = [
-            row[0]
-            for row in connection.execute(
-                text(
-                    "SELECT DISTINCT trade_date FROM trend_history_fo_universe "
-                    "WHERE trade_date <= :run_date ORDER BY trade_date DESC "
-                    "LIMIT :history_days"
-                ),
-                {"run_date": run_date, "history_days": history_days},
-            )
-        ]
         trend_symbols = {
             row[0]
             for row in connection.execute(
@@ -54,17 +83,24 @@ def verify_inputs(engine, run_date: date, history_days: int = 5) -> dict:
                 {"run_date": run_date},
             )
         }
-        incomplete_trend_symbols = connection.execute(
+        selected_trend_rows = connection.execute(
             text(
-                "SELECT symbol FROM trend_history_fo_universe "
-                "WHERE trade_date IN ("
-                "SELECT DISTINCT trade_date FROM trend_history_fo_universe "
-                "WHERE trade_date <= :run_date ORDER BY trade_date DESC "
-                "LIMIT :history_days) AND symbol IN ("
-                "SELECT DISTINCT symbol FROM trend_history_fo_universe "
-                "WHERE trade_date = :run_date) "
-                "GROUP BY symbol HAVING COUNT(*) <> :history_days "
-                "OR COUNT(DISTINCT trade_date) <> :history_days"
+                "WITH target_symbols AS ("
+                "  SELECT DISTINCT symbol FROM trend_history_fo_universe "
+                "  WHERE trade_date = :run_date"
+                "), ranked AS ("
+                "  SELECT history.symbol, history.trade_date, "
+                "         ROW_NUMBER() OVER ("
+                "           PARTITION BY history.symbol "
+                "           ORDER BY history.trade_date DESC"
+                "         ) AS session_rank "
+                "  FROM trend_history_fo_universe AS history "
+                "  JOIN target_symbols USING (symbol) "
+                "  WHERE history.trade_date <= :run_date"
+                ") "
+                "SELECT symbol, trade_date FROM ranked "
+                "WHERE session_rank <= :history_days "
+                "ORDER BY symbol, trade_date"
             ),
             {"run_date": run_date, "history_days": history_days},
         ).fetchall()
@@ -76,15 +112,15 @@ def verify_inputs(engine, run_date: date, history_days: int = 5) -> dict:
             {"run_date": run_date},
         ).scalar_one()
 
-    ordered_dates = sorted(trend_dates)
-    if len(ordered_dates) != history_days or ordered_dates[-1] != run_date:
-        raise RuntimeError("Exact target-date Trend History is incomplete.")
     if not trend_symbols:
         raise RuntimeError("Exact target-date Trend History has no symbols.")
     if trend_symbols != contract_symbols:
         raise RuntimeError("Exact target-date Trend and contract symbol sets differ.")
-    if incomplete_trend_symbols:
-        raise RuntimeError("Trend History contains incomplete or duplicate symbol sessions.")
+    trend_date_patterns = build_trend_date_patterns(
+        selected_trend_rows,
+        run_date,
+        history_days,
+    )
     if int(contract_row_count) != len(contract_symbols):
         raise RuntimeError("Contract snapshot contains duplicate target-date symbol rows.")
 
@@ -101,7 +137,8 @@ def verify_inputs(engine, run_date: date, history_days: int = 5) -> dict:
 
     return {
         "run_date": run_date.isoformat(),
-        "trend_dates": [item.isoformat() for item in ordered_dates],
+        "trend_dates": trend_date_patterns[0]["dates"],
+        "trend_date_patterns": trend_date_patterns,
         "trend_symbol_count": len(trend_symbols),
         "contract_symbol_count": len(contract_symbols),
         "strategy_input_count": len(strategy_inputs),

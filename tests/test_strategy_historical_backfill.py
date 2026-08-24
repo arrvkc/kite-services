@@ -25,6 +25,9 @@ from engines.strategy_deterministic_engine.scripts.sync_contract_snapshot_fo_uni
 from engines.strategy_deterministic_engine.scripts.sync_trend_history_fo_universe_to_db import (
     build_argument_parser as trend_parser,
 )
+from engines.strategy_deterministic_engine.scripts.verify_strategy_backfill_inputs import (
+    build_trend_date_patterns,
+)
 from engines.trend_identifier.trend_identifier.runners.equity_trend_history_runner import (
     EquityTrendHistoryRunner,
 )
@@ -208,6 +211,27 @@ class HistoricalBackfillContractTests(unittest.TestCase):
             "WHERE run_date = :run_date",
             str(DELETE_STRATEGY_BATCH_RESULTS_FOR_DATE_SQL),
         )
+
+    def test_per_symbol_session_patterns_allow_valid_sparse_market_series(self):
+        rows = [
+            ("ABC", date(2026, 8, day))
+            for day in (14, 17, 18, 19, 20)
+        ] + [
+            ("SPARSE", date(2026, 8, day))
+            for day in (12, 14, 17, 19, 20)
+        ]
+        patterns = build_trend_date_patterns(rows, date(2026, 8, 20), 5)
+        self.assertEqual(sum(item["symbol_count"] for item in patterns), 2)
+        self.assertEqual(len(patterns), 2)
+        self.assertTrue(all(item["dates"][-1] == "2026-08-20" for item in patterns))
+
+    def test_per_symbol_session_patterns_reject_missing_target_session(self):
+        rows = [
+            ("ABC", date(2026, 8, day))
+            for day in (13, 14, 17, 18, 19)
+        ]
+        with self.assertRaisesRegex(RuntimeError, "non-target sessions"):
+            build_trend_date_patterns(rows, date(2026, 8, 20), 5)
 
 
 if __name__ == "__main__":
