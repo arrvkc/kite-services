@@ -66,6 +66,32 @@ def _money(value: float) -> float:
     return round(float(value), 8)
 
 
+def _breakeven_prices(candidate: Candidate, net_premium: float) -> list[float]:
+    """Return governed expiry breakevens for the reviewed defined-risk family."""
+
+    strikes = {
+        (leg.side, leg.contract.option_type): leg.contract.strike
+        for leg in candidate.legs
+    }
+    family = candidate.strategy_family
+    if family == FAMILY_BULL_CALL_SPREAD:
+        values = [strikes[(SIDE_BUY, OPTION_CE)] + net_premium]
+    elif family == FAMILY_BEAR_PUT_SPREAD:
+        values = [strikes[(SIDE_BUY, OPTION_PE)] - net_premium]
+    elif family == FAMILY_BULL_PUT_SPREAD:
+        values = [strikes[(SIDE_SELL, OPTION_PE)] - net_premium]
+    elif family == FAMILY_BEAR_CALL_SPREAD:
+        values = [strikes[(SIDE_SELL, OPTION_CE)] + net_premium]
+    elif family == FAMILY_IRON_CONDOR:
+        values = [
+            strikes[(SIDE_SELL, OPTION_PE)] - net_premium,
+            strikes[(SIDE_SELL, OPTION_CE)] + net_premium,
+        ]
+    else:
+        return []
+    return [_money(value) for value in sorted(values)]
+
+
 def _spread_pct(contract: OptionContract) -> float:
     if contract.bid_price is None or contract.ask_price is None:
         return float("inf")
@@ -921,6 +947,7 @@ class OptionsConstructionEngine:
             "net_premium": None,
             "max_loss_per_lot": None,
             "max_profit_per_lot": None,
+            "breakeven_prices": [],
             "construction_score": None,
             "execution_ready": False,
             "construction_status": STATUS_REJECTED,
@@ -966,6 +993,9 @@ class OptionsConstructionEngine:
             "net_premium": _money(selected.economics.net_premium),
             "max_loss_per_lot": _money(selected.economics.max_loss_per_lot),
             "max_profit_per_lot": _money(selected.economics.max_profit_per_lot),
+            "breakeven_prices": _breakeven_prices(
+                selected.candidate, selected.economics.net_premium
+            ),
             "construction_score": selected.construction_score,
             "execution_ready": False if (
                 self._is_after_hours_historical()

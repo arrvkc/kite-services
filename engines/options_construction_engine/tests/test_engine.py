@@ -4,13 +4,17 @@ import copy
 import json
 from pathlib import Path
 from decimal import Decimal
+from types import SimpleNamespace
 
 from engines.options_construction_engine.constants import *
 from engines.options_construction_engine.contract import (
     CONTRACT_IDENTITY,
     construct_from_supplied_market_facts,
 )
-from engines.options_construction_engine.engine import OptionsConstructionEngine
+from engines.options_construction_engine.engine import (
+    OptionsConstructionEngine,
+    _breakeven_prices,
+)
 from engines.options_construction_engine.models import OptionsConstructionConfig
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -60,6 +64,51 @@ def test_tc_001_bear_call_next_month_delta_available_constructs_when_quotes_are_
     assert result["legs"][0]["option_type"] == "CE"
     assert result["legs"][0]["strike"] < result["legs"][1]["strike"]
     assert result["expiry"] == "2026-05-28"
+    assert result["breakeven_prices"] == [
+        result["legs"][0]["strike"] + result["net_premium"]
+    ]
+
+
+def test_reviewed_spread_breakeven_uses_family_payoff_contract():
+    fixture = load_reference()
+    result = construct_from_fixture(fixture, compatibility=True)
+
+    assert result["strategy_family"] == FAMILY_BEAR_CALL_SPREAD
+    assert result["breakeven_prices"] == [156.0]
+    assert result["breakeven_prices"][0] == (
+        result["legs"][0]["strike"] + result["net_premium"]
+    )
+
+
+def test_breakeven_contract_covers_all_reviewed_defined_risk_families():
+    def candidate(family, legs):
+        return SimpleNamespace(
+            strategy_family=family,
+            legs=tuple(
+                SimpleNamespace(
+                    side=side,
+                    contract=SimpleNamespace(option_type=option_type, strike=strike),
+                )
+                for side, option_type, strike in legs
+            ),
+        )
+
+    assert _breakeven_prices(candidate(FAMILY_BULL_CALL_SPREAD, (
+        (SIDE_BUY, OPTION_CE, 100), (SIDE_SELL, OPTION_CE, 110)
+    )), 4) == [104]
+    assert _breakeven_prices(candidate(FAMILY_BEAR_PUT_SPREAD, (
+        (SIDE_BUY, OPTION_PE, 100), (SIDE_SELL, OPTION_PE, 90)
+    )), 4) == [96]
+    assert _breakeven_prices(candidate(FAMILY_BULL_PUT_SPREAD, (
+        (SIDE_SELL, OPTION_PE, 100), (SIDE_BUY, OPTION_PE, 90)
+    )), 4) == [96]
+    assert _breakeven_prices(candidate(FAMILY_BEAR_CALL_SPREAD, (
+        (SIDE_SELL, OPTION_CE, 100), (SIDE_BUY, OPTION_CE, 110)
+    )), 4) == [104]
+    assert _breakeven_prices(candidate(FAMILY_IRON_CONDOR, (
+        (SIDE_BUY, OPTION_PE, 80), (SIDE_SELL, OPTION_PE, 90),
+        (SIDE_SELL, OPTION_CE, 110), (SIDE_BUY, OPTION_CE, 120),
+    )), 4) == [86, 114]
 
 
 def test_tc_002_rejects_zero_bid_first_candidate_and_evaluates_next_candidate():

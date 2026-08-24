@@ -44,6 +44,12 @@ OUTPUT_SCHEMA: dict[str, Any] = {
         "net_premium": {"type": ["number", "null"]},
         "max_loss_per_lot": {"type": ["number", "null"]},
         "max_profit_per_lot": {"type": ["number", "null"]},
+        "breakeven_prices": {
+            "type": "array",
+            "items": {"type": "number", "exclusiveMinimum": 0},
+            "minItems": 0,
+            "maxItems": 2,
+        },
         "construction_score": {"type": ["integer", "null"], "minimum": 0, "maximum": 100},
         "execution_ready": {"type": "boolean"},
         "construction_status": {"enum": [STATUS_CONSTRUCTED, STATUS_REJECTED]},

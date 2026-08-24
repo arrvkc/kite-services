@@ -32,6 +32,7 @@
   "net_premium": 1.0,
   "max_loss_per_lot": 400.0,
   "max_profit_per_lot": 100.0,
+  "breakeven_prices": [156.0],
   "construction_score": 81,
   "execution_ready": true,
   "construction_status": "CONSTRUCTED",
