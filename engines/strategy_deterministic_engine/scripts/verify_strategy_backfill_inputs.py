@@ -61,6 +61,17 @@ def build_trend_date_patterns(rows, run_date: date, history_days: int) -> list[d
     ]
 
 
+def validate_strategy_input_coverage(
+    strategy_input_count: int,
+    target_symbols: set[str],
+    excluded_symbols: set[str],
+) -> None:
+    if not excluded_symbols.issubset(target_symbols):
+        raise RuntimeError("Strategy input exclusions are outside the target universe.")
+    if strategy_input_count + len(excluded_symbols) != len(target_symbols):
+        raise RuntimeError("One or more Strategy inputs were silently excluded.")
+
+
 def verify_inputs(engine, run_date: date, history_days: int = 5) -> dict:
     with engine.connect() as connection:
         trend_symbols = {
@@ -104,6 +115,31 @@ def verify_inputs(engine, run_date: date, history_days: int = 5) -> dict:
             ),
             {"run_date": run_date, "history_days": history_days},
         ).fetchall()
+        null_score_symbols = {
+            row[0]
+            for row in connection.execute(
+                text(
+                    "WITH target_symbols AS ("
+                    "  SELECT DISTINCT symbol FROM trend_history_fo_universe "
+                    "  WHERE trade_date = :run_date"
+                    "), ranked AS ("
+                    "  SELECT history.symbol, history.aggregate_score, "
+                    "         ROW_NUMBER() OVER ("
+                    "           PARTITION BY history.symbol "
+                    "           ORDER BY history.trade_date DESC"
+                    "         ) AS session_rank "
+                    "  FROM trend_history_fo_universe AS history "
+                    "  JOIN target_symbols USING (symbol) "
+                    "  WHERE history.trade_date <= :run_date"
+                    ") "
+                    "SELECT symbol FROM ranked "
+                    "WHERE session_rank <= :history_days "
+                    "GROUP BY symbol "
+                    "HAVING COUNT(*) FILTER (WHERE aggregate_score IS NULL) > 0"
+                ),
+                {"run_date": run_date, "history_days": history_days},
+            )
+        }
         contract_row_count = connection.execute(
             text(
                 "SELECT COUNT(*) FROM contract_snapshot_fo_universe "
@@ -132,8 +168,11 @@ def verify_inputs(engine, run_date: date, history_days: int = 5) -> dict:
     ).build_all()
     if not strategy_inputs:
         raise RuntimeError("No exact-date Strategy inputs were produced.")
-    if len(strategy_inputs) != len(trend_symbols):
-        raise RuntimeError("One or more exact-date symbols lacked five coherent Trend sessions.")
+    validate_strategy_input_coverage(
+        len(strategy_inputs),
+        trend_symbols,
+        null_score_symbols,
+    )
 
     return {
         "run_date": run_date.isoformat(),
@@ -142,6 +181,11 @@ def verify_inputs(engine, run_date: date, history_days: int = 5) -> dict:
         "trend_symbol_count": len(trend_symbols),
         "contract_symbol_count": len(contract_symbols),
         "strategy_input_count": len(strategy_inputs),
+        "strategy_input_exclusion_count": len(null_score_symbols),
+        "strategy_input_exclusions": [
+            {"symbol": symbol, "reason": "NULL_AGGREGATE_SCORE"}
+            for symbol in sorted(null_score_symbols)
+        ],
         "contract_snapshot_exact": True,
         "future_trend_rows_selected": 0,
     }

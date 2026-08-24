@@ -27,6 +27,7 @@ from engines.strategy_deterministic_engine.scripts.sync_trend_history_fo_univers
 )
 from engines.strategy_deterministic_engine.scripts.verify_strategy_backfill_inputs import (
     build_trend_date_patterns,
+    validate_strategy_input_coverage,
 )
 from engines.trend_identifier.trend_identifier.runners.equity_trend_history_runner import (
     EquityTrendHistoryRunner,
@@ -237,6 +238,15 @@ class HistoricalBackfillContractTests(unittest.TestCase):
         ]
         with self.assertRaisesRegex(RuntimeError, "non-target sessions"):
             build_trend_date_patterns(rows, date(2026, 8, 20), 5)
+
+    def test_declared_null_score_exclusions_reconcile_strategy_input_count(self):
+        target_symbols = {f"SYM{index}" for index in range(214)}
+        excluded_symbols = {f"SYM{index}" for index in range(7)}
+        validate_strategy_input_coverage(207, target_symbols, excluded_symbols)
+
+    def test_undeclared_strategy_input_drop_fails_closed(self):
+        with self.assertRaisesRegex(RuntimeError, "silently excluded"):
+            validate_strategy_input_coverage(1, {"A", "B", "C"}, {"C"})
 
 
 if __name__ == "__main__":
