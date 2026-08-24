@@ -155,6 +155,9 @@ class HistoricalBackfillContractTests(unittest.TestCase):
         inputs = adapter.build_all()
         self.assertEqual(len(inputs), 1)
         self.assertIn("trade_date <= :run_date", adapter.sql[0])
+        self.assertIn("ROW_NUMBER() OVER", adapter.sql[0])
+        self.assertIn("PARTITION BY history.symbol", adapter.sql[0])
+        self.assertIn("trade_date = :run_date", adapter.sql[0])
         self.assertIn("selection_date = :run_date", adapter.sql[1])
         self.assertNotIn("selection_date <= :run_date", adapter.sql[1])
 
@@ -164,6 +167,8 @@ class HistoricalBackfillContractTests(unittest.TestCase):
             run_date=date(2026, 8, 20),
         )
         adapter.build_all()
+        self.assertIn("SELECT DISTINCT trade_date", adapter.sql[0])
+        self.assertNotIn("ROW_NUMBER() OVER", adapter.sql[0])
         self.assertIn("selection_date <= :run_date", adapter.sql[1])
 
     def test_contract_dte_is_relative_to_target_date(self):

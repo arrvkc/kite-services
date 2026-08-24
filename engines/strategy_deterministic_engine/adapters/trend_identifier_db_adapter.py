@@ -31,29 +31,72 @@ class TrendIdentifierDbAdapter:
         return pd.DataFrame(rows, columns=columns)
 
     def build_all(self):
-        trend_df = self._fetch_dataframe(
+        if self.require_exact_contract_snapshot:
+            trend_sql = """
+                WITH target_symbols AS (
+                    SELECT DISTINCT symbol
+                    FROM trend_history_fo_universe
+                    WHERE trade_date = :run_date
+                ), ranked_history AS (
+                    SELECT
+                        history.symbol,
+                        history.trade_date,
+                        history.close,
+                        history.label,
+                        history.confidence,
+                        history.aggregate_score,
+                        history.internal_state,
+                        history.exchange,
+                        history.tradingsymbol,
+                        history.instrument_token,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY history.symbol
+                            ORDER BY history.trade_date DESC
+                        ) AS session_rank
+                    FROM trend_history_fo_universe AS history
+                    JOIN target_symbols USING (symbol)
+                    WHERE history.trade_date <= :run_date
+                )
+                SELECT
+                    symbol,
+                    trade_date AS date,
+                    close,
+                    label,
+                    confidence,
+                    aggregate_score,
+                    internal_state,
+                    exchange,
+                    tradingsymbol,
+                    instrument_token
+                FROM ranked_history
+                WHERE session_rank <= :history_days
+                ORDER BY symbol, trade_date
             """
-            SELECT
-                symbol,
-                trade_date AS date,
-                close,
-                label,
-                confidence,
-                aggregate_score,
-                internal_state,
-                exchange,
-                tradingsymbol,
-                instrument_token
-            FROM trend_history_fo_universe
-            WHERE trade_date IN (
-                SELECT DISTINCT trade_date
+        else:
+            trend_sql = """
+                SELECT
+                    symbol,
+                    trade_date AS date,
+                    close,
+                    label,
+                    confidence,
+                    aggregate_score,
+                    internal_state,
+                    exchange,
+                    tradingsymbol,
+                    instrument_token
                 FROM trend_history_fo_universe
-                WHERE trade_date <= :run_date
-                ORDER BY trade_date DESC
-                LIMIT :history_days
-            )
-            ORDER BY symbol, trade_date
-            """,
+                WHERE trade_date IN (
+                    SELECT DISTINCT trade_date
+                    FROM trend_history_fo_universe
+                    WHERE trade_date <= :run_date
+                    ORDER BY trade_date DESC
+                    LIMIT :history_days
+                )
+                ORDER BY symbol, trade_date
+            """
+        trend_df = self._fetch_dataframe(
+            trend_sql,
             {
                 "run_date": self.run_date,
                 "history_days": self.history_days,
