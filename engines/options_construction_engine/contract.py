@@ -90,3 +90,19 @@ def construct_from_supplied_market_facts(
     payload = _engine_value(deepcopy(dict(strategy_context)))
     chain = _engine_value(deepcopy([dict(item) for item in option_chain]))
     return OptionsConstructionEngine(config).construct(payload, chain)
+
+
+def construct_with_scored_alternatives(
+    strategy_context: Mapping[str, Any],
+    option_chain: Sequence[Mapping[str, Any]],
+    *,
+    config: OptionsConstructionConfig | None = None,
+) -> dict[str, Any]:
+    """Return the unchanged winner plus authoritative in-memory scored rows."""
+    if not isinstance(strategy_context, Mapping) or not isinstance(option_chain, Sequence):
+        raise TypeError("Supplied construction facts must use mapping/sequence contracts.")
+    payload = _engine_value(deepcopy(dict(strategy_context)))
+    chain = _engine_value(deepcopy([dict(item) for item in option_chain]))
+    return OptionsConstructionEngine(config).construct(
+        payload, chain, include_scored_candidates=True
+    )

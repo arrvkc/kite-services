@@ -10,6 +10,7 @@ from engines.options_construction_engine.constants import *
 from engines.options_construction_engine.contract import (
     CONTRACT_IDENTITY,
     construct_from_supplied_market_facts,
+    construct_with_scored_alternatives,
 )
 from engines.options_construction_engine.engine import (
     OptionsConstructionEngine,
@@ -36,6 +37,24 @@ def test_reference_fixture_matches_expected_output_in_declared_compatibility_mod
     with (ROOT / "examples" / "reference_expected_output.json").open("r", encoding="utf-8") as fh:
         expected = json.load(fh)
     assert result == expected
+
+
+def test_reviewed_contract_exposes_stable_in_memory_scored_candidates_without_changing_winner():
+    first = load_reference()
+    chain = first.pop("option_chain")
+    config = OptionsConstructionConfig(reference_fixture_compatibility=True)
+    winner = construct_from_supplied_market_facts(first, chain, config=config)
+    enriched = construct_with_scored_alternatives(first, chain, config=config)
+    repeated = construct_with_scored_alternatives(first, chain, config=config)
+
+    assert {key: enriched[key] for key in winner} == winner
+    assert enriched["scored_candidates"]
+    selected = [item for item in enriched["scored_candidates"] if item["selected"]]
+    assert len(selected) == 1
+    assert selected[0]["candidate_id"] == enriched["candidate_id"]
+    assert [item["candidate_id"] for item in enriched["scored_candidates"]] == [
+        item["candidate_id"] for item in repeated["scored_candidates"]
+    ]
 
 
 def test_strict_default_rejects_pdf_reference_due_no_next_expiry_first():

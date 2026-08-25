@@ -55,6 +55,30 @@ OUTPUT_SCHEMA: dict[str, Any] = {
         "construction_status": {"enum": [STATUS_CONSTRUCTED, STATUS_REJECTED]},
         "reason_codes": {"type": "array", "items": {"type": "string"}, "uniqueItems": True},
         "errors": {"type": "array", "items": {"type": "object", "required": ["code", "message"]}},
+        "candidate_id": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+        "scored_candidates": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": ["candidate_id", "selected", "expiry", "legs", "net_premium", "width_value", "credit_or_debit_to_width", "max_loss_per_lot", "max_profit_per_lot", "breakeven_prices", "reward_risk_ratio", "roi", "construction_score"],
+                "properties": {
+                    "candidate_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                    "selected": {"type": "boolean"},
+                    "expiry": {"type": "string", "format": "date"},
+                    "legs": {"type": "array", "items": {"type": "object"}},
+                    "net_premium": {"type": "number"},
+                    "width_value": {"type": "number", "exclusiveMinimum": 0},
+                    "credit_or_debit_to_width": {"type": ["number", "null"]},
+                    "max_loss_per_lot": {"type": "number", "minimum": 0},
+                    "max_profit_per_lot": {"type": "number", "minimum": 0},
+                    "breakeven_prices": {"type": "array", "items": {"type": "number", "exclusiveMinimum": 0}, "maxItems": 2},
+                    "reward_risk_ratio": {"type": ["number", "null"]},
+                    "roi": {"type": ["number", "null"]},
+                    "construction_score": {"type": "integer", "minimum": 0, "maximum": 100}
+                },
+                "additionalProperties": False
+            }
+        },
     },
 }
 VALIDATOR = Draft202012Validator(OUTPUT_SCHEMA)

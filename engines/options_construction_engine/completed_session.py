@@ -23,7 +23,7 @@ from .constants import (
     LIQUIDITY_MODE_COMPLETED_SESSION_HISTORICAL,
 )
 from .contract import (
-    construct_from_supplied_market_facts,
+    construct_with_scored_alternatives,
     prepare_supplied_option_market_context,
 )
 from .models import OptionsConstructionConfig
@@ -305,7 +305,7 @@ def construct_from_completed_session_market_facts(
         freshness_policy=COMPLETED_SESSION_EVIDENCE_VERSION,
         implementation_build_hash=engine_source_identity,
     )
-    result = construct_from_supplied_market_facts(
+    result = construct_with_scored_alternatives(
         payload,
         normalized_chain,
         config=config,

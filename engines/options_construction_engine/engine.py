@@ -146,7 +146,8 @@ class OptionsConstructionEngine:
         return self.config.liquidity_mode == LIQUIDITY_MODE_COMPLETED_SESSION_HISTORICAL
 
     # Section 20 public orchestration.
-    def construct(self, strategy_result_or_payload: dict[str, Any], option_chain: list[dict[str, Any]]) -> dict[str, Any]:
+    def construct(self, strategy_result_or_payload: dict[str, Any], option_chain: list[dict[str, Any]], *, include_scored_candidates: bool = False) -> dict[str, Any]:
+        self._include_scored_candidates = bool(include_scored_candidates)
         strategy_payload = strategy_payload_from_result(strategy_result_or_payload)
         audit: dict[str, Any] = self._new_audit(strategy_payload, option_chain)
 
@@ -295,6 +296,12 @@ class OptionsConstructionEngine:
             reason_codes.append(COMPLETED_SESSION_HISTORICAL_PRICE_MODE)
         reason_codes.extend([PREMIUM_CHECK_PASSED, CONSTRUCTION_SUCCESS])
         output = self._success_output(strategy_payload, selected, reason_codes)
+        if self._include_scored_candidates:
+            output["candidate_id"] = selected.candidate.candidate_id
+            output["scored_candidates"] = [
+                self._scored_candidate_output(item, selected.candidate.candidate_id)
+                for item in self._rank_scored(scored)
+            ]
 
         schema_errors = sorted(VALIDATOR.iter_errors(output), key=lambda e: list(e.path))
         if schema_errors:
@@ -308,7 +315,7 @@ class OptionsConstructionEngine:
 
     # Section 18.
     def _new_audit(self, strategy_payload: dict[str, Any], option_chain: list[dict[str, Any]]) -> dict[str, Any]:
-        return {
+        output = {
             "spec_identifier": SPEC_IDENTIFIER,
             "implementation_build_hash": self.config.implementation_build_hash,
             "input_snapshot": {
@@ -340,6 +347,7 @@ class OptionsConstructionEngine:
             "idempotency": {},
             "runtime": {},
         }
+        return output
 
     # Section 3 / Section 17 Stage 1.
     def _validate_inputs(self, payload: dict[str, Any], option_chain: Any) -> Optional[tuple[str, list[dict[str, str]]]]:
@@ -953,6 +961,47 @@ class OptionsConstructionEngine:
             "construction_status": STATUS_REJECTED,
             "reason_codes": _unique(reason_codes),
             "errors": errors,
+        }
+        if getattr(self, "_include_scored_candidates", False):
+            output.update(candidate_id=None, scored_candidates=[])
+        return output
+
+    def _scored_candidate_output(self, scored: ScoredCandidate, selected_id: str) -> dict[str, Any]:
+        candidate = scored.candidate
+        net = scored.economics.net_premium
+        width = scored.economics.width_value
+        return {
+            "candidate_id": candidate.candidate_id,
+            "selected": candidate.candidate_id == selected_id,
+            "expiry": candidate.expiry,
+            "legs": [
+                {
+                    "role": leg.role,
+                    "side": leg.side,
+                    "option_type": leg.contract.option_type,
+                    "strike": int(leg.contract.strike) if leg.contract.strike.is_integer() else leg.contract.strike,
+                    "expiry": leg.contract.expiry,
+                    "tradingsymbol": leg.contract.tradingsymbol,
+                    "instrument_token": leg.contract.instrument_token,
+                    "bid_price": None if leg.contract.bid_price is None else _money(leg.contract.bid_price),
+                    "ask_price": None if leg.contract.ask_price is None else _money(leg.contract.ask_price),
+                    **(
+                        {"historical_reference_price": _money(leg.contract.historical_reference_price)}
+                        if self._is_completed_session_historical() and leg.contract.historical_reference_price is not None
+                        else {}
+                    ),
+                }
+                for leg in candidate.legs
+            ],
+            "net_premium": _money(net),
+            "width_value": _money(width),
+            "credit_or_debit_to_width": None if not width else _money(net / width),
+            "max_loss_per_lot": _money(scored.economics.max_loss_per_lot),
+            "max_profit_per_lot": _money(scored.economics.max_profit_per_lot),
+            "breakeven_prices": _breakeven_prices(candidate, net),
+            "reward_risk_ratio": scored.economics.reward_risk_ratio,
+            "roi": scored.economics.reward_risk_ratio,
+            "construction_score": scored.construction_score,
         }
 
     # Section 15.
