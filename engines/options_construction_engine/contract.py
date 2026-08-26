@@ -106,3 +106,32 @@ def construct_with_scored_alternatives(
     return OptionsConstructionEngine(config).construct(
         payload, chain, include_scored_candidates=True
     )
+
+
+def construct_with_analytical_alternatives(
+    strategy_context: Mapping[str, Any],
+    option_chain: Sequence[Mapping[str, Any]],
+    *,
+    config: OptionsConstructionConfig | None = None,
+) -> dict[str, Any]:
+    """Return a broader comparison set while retaining the normal winner."""
+    payload = _engine_value(deepcopy(dict(strategy_context)))
+    chain = _engine_value(deepcopy([dict(item) for item in option_chain]))
+    normal = OptionsConstructionEngine(config).construct(
+        payload, chain, include_scored_candidates=True
+    )
+    if not normal.get("candidate_id"):
+        return normal
+    analytical = OptionsConstructionEngine(config).construct(
+        payload, chain, include_scored_candidates=True, analytical_comparison=True
+    )
+    if not analytical.get("scored_candidates"):
+        return normal
+    selected_id = normal["candidate_id"]
+    rows = [dict(item, selected=item.get("candidate_id") == selected_id) for item in analytical["scored_candidates"]]
+    if selected_id not in {item.get("candidate_id") for item in rows}:
+        rows.extend(dict(item, selected=True) for item in normal["scored_candidates"] if item.get("candidate_id") == selected_id)
+    result = dict(normal)
+    result["scored_candidates"] = rows
+    result["analytical_comparison"] = True
+    return result

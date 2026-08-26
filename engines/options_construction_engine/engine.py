@@ -146,8 +146,9 @@ class OptionsConstructionEngine:
         return self.config.liquidity_mode == LIQUIDITY_MODE_COMPLETED_SESSION_HISTORICAL
 
     # Section 20 public orchestration.
-    def construct(self, strategy_result_or_payload: dict[str, Any], option_chain: list[dict[str, Any]], *, include_scored_candidates: bool = False) -> dict[str, Any]:
+    def construct(self, strategy_result_or_payload: dict[str, Any], option_chain: list[dict[str, Any]], *, include_scored_candidates: bool = False, analytical_comparison: bool = False) -> dict[str, Any]:
         self._include_scored_candidates = bool(include_scored_candidates)
+        self._analytical_comparison = bool(analytical_comparison)
         strategy_payload = strategy_payload_from_result(strategy_result_or_payload)
         audit: dict[str, Any] = self._new_audit(strategy_payload, option_chain)
 
@@ -608,14 +609,18 @@ class OptionsConstructionEngine:
         elif family == FAMILY_BULL_CALL_SPREAD:
             width_target = self._debit_width_target(spot, step)
             for long in [c for c in contracts if c.option_type == OPTION_CE]:
-                if mode == MODE_DELTA:
+                if getattr(self, "_analytical_comparison", False):
+                    long_dev = abs(long.strike - spot) / spot
+                elif mode == MODE_DELTA:
                     if long.delta is None or not 0.45 <= abs(long.delta) <= 0.60:
                         continue
                     long_dev = abs(abs(long.delta) - 0.50)
                 else:
                     long_dev = abs(long.strike - spot) / spot
                 for short in [c for c in contracts if c.option_type == OPTION_CE and c.strike > long.strike]:
-                    if mode == MODE_DELTA:
+                    if getattr(self, "_analytical_comparison", False):
+                        target_dev = abs(((short.strike - long.strike) / spot) - 0.03)
+                    elif mode == MODE_DELTA:
                         if short.delta is None:
                             continue
                         short_dev = abs(abs(short.delta) - 0.30)

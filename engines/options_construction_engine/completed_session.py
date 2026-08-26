@@ -23,6 +23,7 @@ from .constants import (
     LIQUIDITY_MODE_COMPLETED_SESSION_HISTORICAL,
 )
 from .contract import (
+    construct_with_analytical_alternatives,
     construct_with_scored_alternatives,
     prepare_supplied_option_market_context,
 )
@@ -239,6 +240,7 @@ def construct_from_completed_session_market_facts(
     retrieved_at: datetime,
     source_identity: str,
     engine_source_identity: str,
+    analytical_comparison: bool = False,
 ) -> dict[str, Any]:
     """Construct against one reconstructible latest-completed-session observation."""
 
@@ -305,7 +307,11 @@ def construct_from_completed_session_market_facts(
         freshness_policy=COMPLETED_SESSION_EVIDENCE_VERSION,
         implementation_build_hash=engine_source_identity,
     )
-    result = construct_with_scored_alternatives(
+    constructor = (
+        construct_with_analytical_alternatives
+        if analytical_comparison else construct_with_scored_alternatives
+    )
+    result = constructor(
         payload,
         normalized_chain,
         config=config,
