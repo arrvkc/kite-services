@@ -6,7 +6,9 @@ from datetime import date
 from pathlib import Path
 from typing import Dict, Iterable, List, Sequence
 
-from engines.strategy_deterministic_engine.adapters.trend_identifier_db_adapter import TrendIdentifierDbAdapter
+from engines.strategy_deterministic_engine.adapters.trend_identifier_db_adapter import (
+    TrendIdentifierDbAdapter,
+)
 from engines.strategy_deterministic_engine.db.postgres import get_engine
 from engines.strategy_deterministic_engine.db.upserts import (
     clear_strategy_batch_results_for_run_date,
@@ -15,8 +17,14 @@ from engines.strategy_deterministic_engine.db.upserts import (
     upsert_strategy_batch_result_rows,
 )
 from engines.strategy_deterministic_engine.engine import evaluate_batch
-from engines.strategy_deterministic_engine.family_selection import classify_regime, select_candidate_family
+from engines.strategy_deterministic_engine.family_selection import (
+    classify_regime,
+    select_candidate_family,
+)
 from engines.strategy_deterministic_engine.metrics import compute_history_metrics
+from engines.strategy_deterministic_engine.scripts.verify_strategy_backfill_inputs import (
+    verify_inputs,
+)
 
 
 def build_argument_parser() -> argparse.ArgumentParser:
@@ -149,6 +157,10 @@ def main() -> None:
 
     engine = get_engine()
 
+    input_verification = None
+    if args.require_exact_contract_snapshot:
+        input_verification = verify_inputs(engine, run_date, args.history_days)
+
     adapter = TrendIdentifierDbAdapter(
         engine=engine,
         run_date=run_date,
@@ -161,6 +173,14 @@ def main() -> None:
     results = batch_result["results"]
     ranked_outputs = [item["payload"] for item in results if item["mode"] == "public_payload"]
     invalid_evaluations = [item for item in results if item["mode"] != "public_payload"]
+
+    if len(ranked_outputs) + len(invalid_evaluations) != len(strategy_inputs):
+        raise RuntimeError("Strategy evaluation count did not match its verified inputs.")
+    if (
+        input_verification is not None
+        and input_verification["strategy_input_count"] != len(strategy_inputs)
+    ):
+        raise RuntimeError("Strategy inputs changed after exact-date verification.")
 
     input_map = _build_input_map(strategy_inputs)
 
@@ -232,11 +252,27 @@ def main() -> None:
         print(f"DRY RUN: strategy_inputs={len(strategy_inputs)} public_results={len(ranked_outputs)} invalid={len(invalid_evaluations)} db_rows={len(db_rows)}")
         return
 
+    input_provenance = None
+    if input_verification is not None:
+        input_provenance = {
+            "requested_symbols_count": input_verification[
+                "requested_symbols_count"
+            ],
+            "prepared_symbols_count": input_verification[
+                "prepared_symbols_count"
+            ],
+            "evaluated_symbols_count": len(strategy_inputs),
+            "input_exclusions": input_verification[
+                "strategy_input_exclusions"
+            ],
+        }
+
     with engine.begin() as conn:
         run_id = create_or_restart_strategy_run(
             conn=conn,
             run_date=run_date,
             generated_by_user_id=args.user_id,
+            input_provenance=input_provenance,
         )
 
         for row in db_rows:

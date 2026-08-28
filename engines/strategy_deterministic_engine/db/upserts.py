@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from sqlalchemy import text
 
 
@@ -93,6 +95,94 @@ def upsert_trend_history_rows(engine, rows: list[dict], batch_size: int = 500) -
     return total
 
 
+PREPARE_STRATEGY_RUN_SQL = text("""
+INSERT INTO strategy_deterministic_engine_runs (
+    run_date,
+    generated_by_user_id,
+    source,
+    status,
+    started_at,
+    requested_symbols_count,
+    prepared_symbols_count,
+    evaluated_symbols_count,
+    input_exclusion_count,
+    input_exclusions_json,
+    updated_at
+)
+VALUES (
+    :run_date,
+    :generated_by_user_id,
+    'DB',
+    'INPUTS_PREPARED',
+    now(),
+    :requested_symbols_count,
+    :prepared_symbols_count,
+    NULL,
+    :input_exclusion_count,
+    :input_exclusions_json,
+    now()
+)
+ON CONFLICT (run_date)
+DO UPDATE SET
+    generated_by_user_id = EXCLUDED.generated_by_user_id,
+    source = 'DB',
+    status = 'INPUTS_PREPARED',
+    started_at = now(),
+    finished_at = NULL,
+    total_symbols = NULL,
+    public_results_count = NULL,
+    invalid_count = NULL,
+    requested_symbols_count = EXCLUDED.requested_symbols_count,
+    prepared_symbols_count = EXCLUDED.prepared_symbols_count,
+    evaluated_symbols_count = NULL,
+    input_exclusion_count = EXCLUDED.input_exclusion_count,
+    input_exclusions_json = EXCLUDED.input_exclusions_json,
+    updated_at = now()
+WHERE strategy_deterministic_engine_runs.status <> 'COMPLETED'
+RETURNING id
+""")
+
+
+def persist_strict_trend_preparation(
+    engine,
+    rows: list[dict],
+    *,
+    run_date,
+    generated_by_user_id: str,
+    requested_symbols_count: int,
+    prepared_symbols_count: int,
+    exclusions: list[dict],
+    batch_size: int = 500,
+) -> int:
+    """Atomically persist exact-date rows and their requested-universe audit."""
+    with engine.begin() as conn:
+        total = 0
+        for start in range(0, len(rows), batch_size):
+            batch = rows[start:start + batch_size]
+            conn.execute(TREND_HISTORY_UPSERT_SQL, batch)
+            total += len(batch)
+        run_row = conn.execute(
+            PREPARE_STRATEGY_RUN_SQL,
+            {
+                "run_date": run_date,
+                "generated_by_user_id": generated_by_user_id,
+                "requested_symbols_count": requested_symbols_count,
+                "prepared_symbols_count": prepared_symbols_count,
+                "input_exclusion_count": len(exclusions),
+                "input_exclusions_json": json.dumps(
+                    exclusions,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+            },
+        ).fetchone()
+        if run_row is None:
+            raise RuntimeError(
+                "A completed Strategy run cannot be replaced by input preparation."
+            )
+    return total
+
+
 def upsert_contract_snapshot_rows(engine, rows: list[dict], batch_size: int = 500) -> int:
     if not rows:
         return 0
@@ -117,6 +207,11 @@ INSERT INTO strategy_deterministic_engine_runs (
     source,
     status,
     started_at,
+    requested_symbols_count,
+    prepared_symbols_count,
+    evaluated_symbols_count,
+    input_exclusion_count,
+    input_exclusions_json,
     updated_at
 )
 VALUES (
@@ -125,6 +220,11 @@ VALUES (
     'DB',
     'STARTED',
     now(),
+    :requested_symbols_count,
+    :prepared_symbols_count,
+    :evaluated_symbols_count,
+    :input_exclusion_count,
+    :input_exclusions_json,
     now()
 )
 ON CONFLICT (run_date)
@@ -137,6 +237,11 @@ DO UPDATE SET
     total_symbols = NULL,
     public_results_count = NULL,
     invalid_count = NULL,
+    requested_symbols_count = EXCLUDED.requested_symbols_count,
+    prepared_symbols_count = EXCLUDED.prepared_symbols_count,
+    evaluated_symbols_count = EXCLUDED.evaluated_symbols_count,
+    input_exclusion_count = EXCLUDED.input_exclusion_count,
+    input_exclusions_json = EXCLUDED.input_exclusions_json,
     updated_at = now()
 RETURNING id
 """)
@@ -243,12 +348,30 @@ WHERE run_date = :run_date
 """)
 
 
-def create_or_restart_strategy_run(conn, run_date: date, generated_by_user_id: str | None) -> int:
+def create_or_restart_strategy_run(
+    conn,
+    run_date: date,
+    generated_by_user_id: str | None,
+    input_provenance: dict | None = None,
+) -> int:
+    provenance = input_provenance or {}
+    exclusions = provenance.get("input_exclusions")
     row = conn.execute(
         CREATE_OR_UPDATE_STRATEGY_RUN_SQL,
         {
             "run_date": run_date,
             "generated_by_user_id": generated_by_user_id,
+            "requested_symbols_count": provenance.get("requested_symbols_count"),
+            "prepared_symbols_count": provenance.get("prepared_symbols_count"),
+            "evaluated_symbols_count": provenance.get("evaluated_symbols_count"),
+            "input_exclusion_count": (
+                len(exclusions) if exclusions is not None else None
+            ),
+            "input_exclusions_json": (
+                json.dumps(exclusions, sort_keys=True, separators=(",", ":"))
+                if exclusions is not None
+                else None
+            ),
         },
     ).fetchone()
     return int(row[0])

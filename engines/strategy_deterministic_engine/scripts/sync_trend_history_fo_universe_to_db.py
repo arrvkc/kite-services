@@ -3,17 +3,24 @@ from __future__ import annotations
 import argparse
 import math
 from datetime import date
+from typing import Any
 
 import pandas as pd
 from kiteconnect import KiteConnect
 
 from services.kite_credentials_service import get_kite_credentials
-from engines.strategy_deterministic_engine.adapters.trend_identifier_adapter import TrendIdentifierKiteAdapter
+from engines.strategy_deterministic_engine.adapters.trend_identifier_adapter import (
+    TrendIdentifierKiteAdapter,
+)
 from engines.trend_identifier.trend_identifier.runners.equity_trend_history_runner import (
     EquityTrendHistoryRunner,
+    NoTradingActivityCandidate,
 )
 from engines.strategy_deterministic_engine.db.postgres import get_engine
-from engines.strategy_deterministic_engine.db.upserts import upsert_trend_history_rows
+from engines.strategy_deterministic_engine.db.upserts import (
+    persist_strict_trend_preparation,
+    upsert_trend_history_rows,
+)
 
 
 def clean_value(value):
@@ -28,6 +35,83 @@ def clean_value(value):
 
 def to_date(value) -> date:
     return pd.Timestamp(value).date()
+
+
+def json_value(value: Any) -> Any:
+    value = clean_value(value)
+    if value is None:
+        return None
+    if hasattr(value, "item"):
+        value = value.item()
+    if isinstance(value, pd.Timestamp):
+        return value.isoformat()
+    return value
+
+
+def no_trading_exclusion(candidate: NoTradingActivityCandidate) -> dict:
+    evidence = candidate.evidence
+    return {
+        "symbol": evidence.symbol,
+        "reason": candidate.reason,
+        "stage": "TREND_PREPARATION",
+        "target_date": evidence.target_date.isoformat(),
+        "selected_instrument": {
+            "exchange": evidence.exchange,
+            "tradingsymbol": evidence.tradingsymbol,
+            "instrument_token": evidence.instrument_token,
+        },
+        "evidence": {
+            "daily_timestamp": evidence.daily_timestamp,
+            "daily_open": json_value(evidence.daily_open),
+            "daily_high": json_value(evidence.daily_high),
+            "daily_low": json_value(evidence.daily_low),
+            "daily_close": json_value(evidence.daily_close),
+            "daily_volume": json_value(evidence.daily_volume),
+            "daily_oi": json_value(evidence.daily_oi),
+            "required_interval": evidence.required_interval,
+            "target_intraday_candle_count": evidence.intraday_candle_count,
+            "market_session_confirmation": "PREPARED_PEER_TARGET_SESSION",
+        },
+    }
+
+
+def build_strict_preparation_manifest(
+    requested_symbols: list[str],
+    prepared_symbols: set[str],
+    candidates: list[NoTradingActivityCandidate],
+    *,
+    end_date: date,
+) -> dict:
+    requested = [symbol.strip().upper() for symbol in requested_symbols]
+    if len(requested) != len(set(requested)):
+        raise RuntimeError("Requested Strategy universe contains duplicate symbols.")
+    candidate_symbols = {candidate.evidence.symbol for candidate in candidates}
+    if prepared_symbols & candidate_symbols:
+        raise RuntimeError("A no-trading symbol was also prepared as a target session.")
+    if set(requested) != prepared_symbols | candidate_symbols:
+        raise RuntimeError("Strict Trend preparation did not explain every requested symbol.")
+    if candidates and not prepared_symbols:
+        raise RuntimeError(
+            "No prepared peer established that the target exchange session existed."
+        )
+    for candidate in candidates:
+        evidence = candidate.evidence
+        if (
+            evidence.target_date != end_date
+            or evidence.daily_volume != 0
+            or evidence.intraday_candle_count != 0
+        ):
+            raise RuntimeError("No-trading evidence did not satisfy the strict contract.")
+    exclusions = [
+        no_trading_exclusion(candidate)
+        for candidate in sorted(candidates, key=lambda item: item.evidence.symbol)
+    ]
+    return {
+        "run_date": end_date,
+        "requested_symbols_count": len(requested),
+        "prepared_symbols_count": len(prepared_symbols),
+        "exclusions": exclusions,
+    }
 
 
 def build_argument_parser() -> argparse.ArgumentParser:
@@ -95,7 +179,9 @@ def main() -> None:
     engine = None if args.dry_run else get_engine()
     total_rows = 0
     failures: list[dict] = []
+    no_trading_candidates: list[NoTradingActivityCandidate] = []
     strict_rows: list[dict] = []
+    prepared_symbols: set[str] = set()
 
     for index, symbol in enumerate(symbols, start=1):
         try:
@@ -106,6 +192,7 @@ def main() -> None:
             )
 
             symbol_rows = build_symbol_rows(args, result)
+            prepared_symbols.add(symbol)
 
             if args.dry_run or args.strict:
                 total_rows += len(symbol_rows)
@@ -129,6 +216,19 @@ def main() -> None:
                 total_rows += written
                 print(f"[{index}/{len(symbols)}] OK {symbol} committed_rows={written}", flush=True)
 
+        except NoTradingActivityCandidate as exc:
+            if args.strict and end_date is not None:
+                no_trading_candidates.append(exc)
+                print(
+                    f"[{index}/{len(symbols)}] EXCLUDED {symbol}: {exc.reason}",
+                    flush=True,
+                )
+            else:
+                failures.append({"symbol": symbol, "error": type(exc).__name__})
+                print(
+                    f"[{index}/{len(symbols)}] FAIL {symbol}: {type(exc).__name__}",
+                    flush=True,
+                )
         except Exception as exc:
             safe_error = type(exc).__name__
             failures.append({"symbol": symbol, "error": safe_error})
@@ -140,15 +240,49 @@ def main() -> None:
         if args.strict:
             raise SystemExit(1)
 
+    manifest = None
+    if args.strict and end_date is not None:
+        try:
+            manifest = build_strict_preparation_manifest(
+                symbols,
+                prepared_symbols,
+                no_trading_candidates,
+                end_date=end_date,
+            )
+        except RuntimeError as exc:
+            print(f"STRICT_PREPARATION_FAIL error={type(exc).__name__}")
+            raise SystemExit(1) from None
+
     if args.dry_run:
         print(f"DRY RUN: prepared_rows={total_rows} failures={len(failures)}")
     elif args.strict:
-        written = upsert_trend_history_rows(
-            engine,
-            strict_rows,
-            batch_size=args.batch_size,
-        )
+        if manifest is None:
+            written = upsert_trend_history_rows(
+                engine,
+                strict_rows,
+                batch_size=args.batch_size,
+            )
+        else:
+            written = persist_strict_trend_preparation(
+                engine,
+                strict_rows,
+                run_date=manifest["run_date"],
+                generated_by_user_id=args.user_id,
+                requested_symbols_count=manifest["requested_symbols_count"],
+                prepared_symbols_count=manifest["prepared_symbols_count"],
+                exclusions=manifest["exclusions"],
+                batch_size=args.batch_size,
+            )
         print(f"UPSERTED trend_history_fo_universe rows={written}")
+        print(
+            "STRICT_PREPARATION "
+            f"requested={len(symbols)} prepared={len(prepared_symbols)} "
+            f"no_trading_activity={len(no_trading_candidates)}"
+        )
+        print(
+            "NO_TRADING_SYMBOLS="
+            + (",".join(sorted(item.evidence.symbol for item in no_trading_candidates)) or "NONE")
+        )
         print("FAILURES count=0")
     else:
         print(f"UPSERTED trend_history_fo_universe rows={total_rows}")

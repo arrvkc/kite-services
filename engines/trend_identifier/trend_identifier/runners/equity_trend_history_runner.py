@@ -11,6 +11,9 @@ from kiteconnect import KiteConnect
 from .equity_trend_runner import EquityTrendRunner
 
 
+NO_TRADING_ACTIVITY = "NO_TRADING_ACTIVITY"
+
+
 @dataclass(frozen=True)
 class TrendHistoryResult:
     symbol: str
@@ -18,6 +21,37 @@ class TrendHistoryResult:
     tradingsymbol: str
     instrument_token: int
     history: pd.DataFrame
+
+
+@dataclass(frozen=True)
+class NoTradingActivityEvidence:
+    symbol: str
+    target_date: date
+    exchange: str
+    tradingsymbol: str
+    instrument_token: int
+    required_interval: str
+    intraday_candle_count: int
+    daily_timestamp: str
+    daily_open: object
+    daily_high: object
+    daily_low: object
+    daily_close: object
+    daily_volume: object
+    daily_oi: object | None
+
+
+class NoTradingActivityCandidate(RuntimeError):
+    """Exact-date zero-volume evidence awaiting market-session confirmation."""
+
+    reason = NO_TRADING_ACTIVITY
+
+    def __init__(self, evidence: NoTradingActivityEvidence) -> None:
+        self.evidence = evidence
+        super().__init__(
+            f"{evidence.symbol} has a zero-volume daily candle and no "
+            f"{evidence.required_interval} bars on {evidence.target_date}."
+        )
 
 
 class EquityTrendHistoryRunner:
@@ -62,7 +96,7 @@ class EquityTrendHistoryRunner:
                 time.max,
                 tzinfo=ZoneInfo("Asia/Kolkata"),
             )
-            raw_bars, _ = self.equity_runner.build_raw_bars_for_symbol_asof(
+            raw_bars, instrument_metadata = self.equity_runner.build_raw_bars_for_symbol_asof(
                 symbol=symbol,
                 asof_time=target_end,
                 daily_lookback_days=30,
@@ -71,6 +105,52 @@ class EquityTrendHistoryRunner:
 
         hourly = raw_bars["hourly"].copy()
         hourly["timestamp"] = pd.to_datetime(hourly["timestamp"], utc=True)
+
+        if target_date is not None:
+            target_hourly = hourly.loc[
+                hourly["timestamp"]
+                .dt.tz_convert("Asia/Kolkata")
+                .dt.date
+                .eq(target_date)
+            ]
+            daily = raw_bars["daily"].copy()
+            if not daily.empty and {"timestamp", "volume"}.issubset(daily.columns):
+                daily["timestamp"] = pd.to_datetime(daily["timestamp"], utc=True)
+                target_daily = daily.loc[
+                    daily["timestamp"]
+                    .dt.tz_convert("Asia/Kolkata")
+                    .dt.date
+                    .eq(target_date)
+                ]
+            else:
+                target_daily = daily
+            if target_hourly.empty and len(target_daily.index) == 1:
+                daily_row = target_daily.iloc[0]
+                if daily_row.get("volume") == 0:
+                    raise NoTradingActivityCandidate(
+                        NoTradingActivityEvidence(
+                            symbol=symbol.upper(),
+                            target_date=target_date,
+                            exchange=str(instrument_metadata["resolved_exchange"]),
+                            tradingsymbol=str(
+                                instrument_metadata["resolved_tradingsymbol"]
+                            ),
+                            instrument_token=int(
+                                instrument_metadata["instrument_token"]
+                            ),
+                            required_interval="60minute",
+                            intraday_candle_count=0,
+                            daily_timestamp=pd.Timestamp(
+                                daily_row["timestamp"]
+                            ).isoformat(),
+                            daily_open=daily_row.get("open"),
+                            daily_high=daily_row.get("high"),
+                            daily_low=daily_row.get("low"),
+                            daily_close=daily_row.get("close"),
+                            daily_volume=daily_row.get("volume"),
+                            daily_oi=daily_row.get("oi"),
+                        )
+                    )
 
         if hourly.empty:
             raise RuntimeError(f"No hourly bars found for {symbol}.")
