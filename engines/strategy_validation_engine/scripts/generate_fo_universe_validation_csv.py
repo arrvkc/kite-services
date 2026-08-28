@@ -4,6 +4,7 @@ import argparse
 import csv
 import os
 import time
+from datetime import date
 from pathlib import Path
 
 import pandas as pd
@@ -35,6 +36,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--forward-days", type=int, default=5)
     parser.add_argument("--near-dte", type=int, default=20)
     parser.add_argument("--next-dte", type=int, default=40)
+    parser.add_argument(
+        "--through-date",
+        default="",
+        help="Optional inclusive upper bound for recovery input, e.g. 2026-08-27",
+    )
     return parser.parse_args()
 
 
@@ -94,8 +100,18 @@ def fetch_trend_history(symbols: list[str] | None) -> pd.DataFrame:
     return df
 
 
+def bound_trend_history(
+    trend_df: pd.DataFrame,
+    through_date: date | None,
+) -> pd.DataFrame:
+    if through_date is None:
+        return trend_df
+    return trend_df.loc[trend_df["date"] <= through_date].copy()
+
+
 def main() -> None:
     args = parse_args()
+    through_date = date.fromisoformat(args.through_date) if args.through_date else None
 
     requested_symbols = (
         [s.strip().upper() for s in args.symbols.split(",") if s.strip()]
@@ -106,7 +122,10 @@ def main() -> None:
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    trend_df = fetch_trend_history(requested_symbols)
+    trend_df = bound_trend_history(
+        fetch_trend_history(requested_symbols),
+        through_date,
+    )
     symbols = sorted(trend_df["symbol"].dropna().unique())
 
     rows: list[dict] = []
