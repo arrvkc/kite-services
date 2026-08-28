@@ -1,7 +1,22 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-docker exec -i postgres psql -U postgres -d atms -v ON_ERROR_STOP=1 <<'SQL'
+RUN_DATE=""
+if [[ $# -gt 0 ]]; then
+    if [[ $# -ne 2 || "$1" != "--run-date" ]]; then
+        echo "Usage: $0 [--run-date YYYY-MM-DD]" >&2
+        exit 64
+    fi
+    RUN_DATE="$2"
+    python3 -c 'from datetime import date; import sys; date.fromisoformat(sys.argv[1])' \
+        "$RUN_DATE" >/dev/null 2>&1 || {
+        echo "Invalid --run-date: $RUN_DATE" >&2
+        exit 64
+    }
+fi
+
+docker exec -i postgres psql -U postgres -d atms -v ON_ERROR_STOP=1 \
+    -v recovery_run_date="$RUN_DATE" <<'SQL'
 
 INSERT INTO signal_trade_entries (
     entry_date,
@@ -47,6 +62,8 @@ WITH base AS (
             ELSE s.run_date + 10
         END AS expiry_date
     FROM strategy_deterministic_engine_batch_results s
+    WHERE NULLIF(:'recovery_run_date', '') IS NULL
+       OR s.run_date = NULLIF(:'recovery_run_date', '')::date
 )
 SELECT
     run_date,
@@ -90,6 +107,8 @@ WITH raw AS (
       ON th.symbol = e.symbol
      AND th.trade_date > e.entry_date
      AND th.trade_date <= e.expiry_date
+    WHERE NULLIF(:'recovery_run_date', '') IS NULL
+       OR e.source_run_date = NULLIF(:'recovery_run_date', '')::date
 ),
 scored AS (
     SELECT
@@ -200,6 +219,8 @@ summary AS (
     LEFT JOIN latest_obs lo
       ON lo.trade_entry_id = e.id
     CROSS JOIN latest_market lm
+    WHERE NULLIF(:'recovery_run_date', '') IS NULL
+       OR e.source_run_date = NULLIF(:'recovery_run_date', '')::date
     GROUP BY
         e.id,
         e.expiry_date,
@@ -224,4 +245,4 @@ ON CONFLICT (trade_entry_id) DO UPDATE SET
 
 SQL
 
-echo "Signal research DB update completed."
+echo "Signal research DB update completed. run_date=${RUN_DATE:-ALL}"
