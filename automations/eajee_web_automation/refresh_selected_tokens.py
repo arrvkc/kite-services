@@ -1,4 +1,5 @@
 import argparse
+from collections import Counter
 import csv
 import os
 import smtplib
@@ -11,6 +12,19 @@ from .config import BASE_DIR
 
 LOG_DIR = BASE_DIR / "logs" / "eajee_web_automation"
 RESULTS_CSV = LOG_DIR / "refresh_token_results.csv"
+
+
+def evaluate_batch_result(requested_users, rows):
+    """Require exactly one persisted SUCCESS result per requested account."""
+    requested = [str(user_id).strip().upper() for user_id in requested_users]
+    observed = [str(row.get("user_id") or "").strip().upper() for row in rows]
+    if (
+        not requested
+        or Counter(observed) != Counter(requested)
+        or any(row.get("status") != "SUCCESS" for row in rows)
+    ):
+        return "PARTIAL_FAILURE"
+    return "SUCCESS"
 
 
 def send_email(to_email, subject, html_body):
@@ -180,8 +194,7 @@ def main():
     rows = parse_new_rows(before, after)
 
     failed_rows = [r for r in rows if r["status"] != "SUCCESS"]
-
-    final_status = "SUCCESS" if not failed_rows else "PARTIAL_FAILURE"
+    final_status = evaluate_batch_result(args.users, rows)
 
     html = build_html_report(rows, final_status)
 
@@ -192,6 +205,12 @@ def main():
         print(f"Email sent to {args.email_to}")
 
     print(f"FINAL_STATUS={final_status}")
+    print(
+        "PERSISTED_VERIFICATION_RESULT="
+        + ("PASS" if final_status == "SUCCESS" else "FAIL")
+    )
+    if final_status != "SUCCESS":
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
