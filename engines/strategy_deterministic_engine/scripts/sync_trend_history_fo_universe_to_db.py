@@ -7,6 +7,7 @@ from typing import Any
 
 import pandas as pd
 from kiteconnect import KiteConnect
+from kiteconnect.exceptions import TokenException
 
 from services.kite_credentials_service import get_kite_credentials
 from engines.strategy_deterministic_engine.adapters.trend_identifier_adapter import (
@@ -131,6 +132,14 @@ def build_argument_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Return non-zero if any requested symbol cannot be reconstructed.",
     )
+    parser.add_argument(
+        "--restart-unverified-completed-run",
+        action="store_true",
+        help=(
+            "Allow governed recovery to replace a completed run only when its "
+            "exact-input provenance is entirely absent."
+        ),
+    )
     parser.add_argument("--dry-run", action="store_true")
     return parser
 
@@ -229,6 +238,14 @@ def main() -> None:
                     f"[{index}/{len(symbols)}] FAIL {symbol}: {type(exc).__name__}",
                     flush=True,
                 )
+        except TokenException:
+            failures.append({"symbol": symbol, "error": "TokenException"})
+            print(
+                f"[{index}/{len(symbols)}] FAIL {symbol}: TokenException",
+                flush=True,
+            )
+            print("AUTHENTICATION_FAILURE aborting_universe_sync=YES", flush=True)
+            raise SystemExit(1) from None
         except Exception as exc:
             safe_error = type(exc).__name__
             failures.append({"symbol": symbol, "error": safe_error})
@@ -272,6 +289,9 @@ def main() -> None:
                 prepared_symbols_count=manifest["prepared_symbols_count"],
                 exclusions=manifest["exclusions"],
                 batch_size=args.batch_size,
+                allow_unverified_completed_restart=(
+                    args.restart_unverified_completed_run
+                ),
             )
         print(f"UPSERTED trend_history_fo_universe rows={written}")
         print(
@@ -287,6 +307,9 @@ def main() -> None:
     else:
         print(f"UPSERTED trend_history_fo_universe rows={total_rows}")
         print(f"FAILURES count={len(failures)}")
+        if total_rows == 0:
+            print("USABLE_TARGET_DATA=NO")
+            raise SystemExit(1)
 
 
 if __name__ == "__main__":

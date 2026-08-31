@@ -139,6 +139,14 @@ DO UPDATE SET
     input_exclusions_json = EXCLUDED.input_exclusions_json,
     updated_at = now()
 WHERE strategy_deterministic_engine_runs.status <> 'COMPLETED'
+   OR (
+       :allow_unverified_completed_restart
+       AND strategy_deterministic_engine_runs.requested_symbols_count IS NULL
+       AND strategy_deterministic_engine_runs.prepared_symbols_count IS NULL
+       AND strategy_deterministic_engine_runs.evaluated_symbols_count IS NULL
+       AND strategy_deterministic_engine_runs.input_exclusion_count IS NULL
+       AND strategy_deterministic_engine_runs.input_exclusions_json IS NULL
+   )
 RETURNING id
 """)
 
@@ -153,6 +161,7 @@ def persist_strict_trend_preparation(
     prepared_symbols_count: int,
     exclusions: list[dict],
     batch_size: int = 500,
+    allow_unverified_completed_restart: bool = False,
 ) -> int:
     """Atomically persist exact-date rows and their requested-universe audit."""
     with engine.begin() as conn:
@@ -173,6 +182,9 @@ def persist_strict_trend_preparation(
                     exclusions,
                     sort_keys=True,
                     separators=(",", ":"),
+                ),
+                "allow_unverified_completed_restart": (
+                    allow_unverified_completed_restart
                 ),
             },
         ).fetchone()

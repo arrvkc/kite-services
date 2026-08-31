@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 from kiteconnect import KiteConnect
+from kiteconnect.exceptions import TokenException
 
 from services.kite_credentials_service import get_kite_credentials
 from engines.strategy_deterministic_engine.adapters.trend_identifier_adapter import TrendIdentifierKiteAdapter
@@ -89,6 +90,11 @@ def main() -> None:
 
             print(f"[{index}/{len(symbols)}] OK {symbol}")
 
+        except TokenException:
+            failures.append({"symbol": symbol, "error": "TokenException"})
+            print(f"[{index}/{len(symbols)}] FAIL {symbol}: TokenException")
+            print("AUTHENTICATION_FAILURE aborting_universe_sync=YES")
+            raise SystemExit(1) from None
         except Exception as exc:
             safe_error = type(exc).__name__
             failures.append({"symbol": symbol, "error": safe_error})
@@ -116,6 +122,9 @@ def main() -> None:
             print(f"FAILURE {failure['symbol']}: {failure['error']}")
         if args.strict:
             raise SystemExit(1)
+    if not rows:
+        print("USABLE_TARGET_DATA=NO")
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

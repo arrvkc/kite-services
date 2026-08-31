@@ -1,10 +1,11 @@
 #!/bin/bash
 set -euo pipefail
 
-APP_DIR="/opt/kite_services"
+APP_DIR="${EAJEE_KITE_SERVICES_DIR:-/opt/kite_services}"
 LOG_DIR="$APP_DIR/logs/strategy_db_pipeline"
+PYTHON_BIN="${EAJEE_KITE_PYTHON:-$APP_DIR/venv/bin/python}"
 
-RUN_DATE="$(date '+%Y-%m-%d')"
+RUN_DATE="${EAJEE_STRATEGY_RUN_DATE:-$(date '+%Y-%m-%d')}"
 RUN_TS="$(date '+%Y-%m-%d_%H-%M-%S')"
 
 USER_ID="OMK569"
@@ -29,14 +30,30 @@ echo "==================================================" >> "$MASTER_LOG"
 {
   echo ""
   echo "--------------------------------------------------"
-  echo "STEP 1: TREND HISTORY SYNC"
+  echo "STEP 0: KITE CREDENTIAL PREFLIGHT"
   echo "START: $(date '+%Y-%m-%d %H:%M:%S')"
   echo "--------------------------------------------------"
 
-  PYTHONPATH=.:services "$APP_DIR/venv/bin/python" \
+  PYTHONPATH=.:services "$PYTHON_BIN" \
+    engines/strategy_deterministic_engine/scripts/validate_strategy_kite_credentials.py \
+    "$USER_ID"
+
+  echo "STEP 0 COMPLETE"
+} >> "$LOG_DIR/credential_preflight_$RUN_TS.log" 2>&1
+
+{
+  echo ""
+  echo "--------------------------------------------------"
+  echo "STEP 1: EXACT-DATE TREND HISTORY SYNC AND VALIDATION"
+  echo "START: $(date '+%Y-%m-%d %H:%M:%S')"
+  echo "--------------------------------------------------"
+
+  PYTHONPATH=.:services "$PYTHON_BIN" \
     engines/strategy_deterministic_engine/scripts/sync_trend_history_fo_universe_to_db.py \
     "$USER_ID" \
-    --history-days 5
+    --history-days 5 \
+    --end-date "$RUN_DATE" \
+    --strict
 
   echo "--------------------------------------------------"
   echo "STEP 1 COMPLETE"
@@ -48,13 +65,15 @@ echo "==================================================" >> "$MASTER_LOG"
 {
   echo ""
   echo "--------------------------------------------------"
-  echo "STEP 2: CONTRACT SNAPSHOT SYNC"
+  echo "STEP 2: EXACT-DATE CONTRACT SNAPSHOT SYNC AND VALIDATION"
   echo "START: $(date '+%Y-%m-%d %H:%M:%S')"
   echo "--------------------------------------------------"
 
-  PYTHONPATH=.:services "$APP_DIR/venv/bin/python" \
+  PYTHONPATH=.:services "$PYTHON_BIN" \
     engines/strategy_deterministic_engine/scripts/sync_contract_snapshot_fo_universe_to_db.py \
-    "$USER_ID"
+    "$USER_ID" \
+    --selection-date "$RUN_DATE" \
+    --strict
 
   echo "--------------------------------------------------"
   echo "STEP 2 COMPLETE"
@@ -66,16 +85,38 @@ echo "==================================================" >> "$MASTER_LOG"
 {
   echo ""
   echo "--------------------------------------------------"
-  echo "STEP 3: STRATEGY ENGINE RUN"
+  echo "STEP 3: EXACT-DATE INPUT GATE"
   echo "START: $(date '+%Y-%m-%d %H:%M:%S')"
   echo "--------------------------------------------------"
 
-  PYTHONPATH=.:services "$APP_DIR/venv/bin/python" \
-    engines/strategy_deterministic_engine/scripts/run_strategy_engine_batch_from_db.py \
-    "$USER_ID"
+  PYTHONPATH=.:services "$PYTHON_BIN" \
+    engines/strategy_deterministic_engine/scripts/verify_strategy_backfill_inputs.py \
+    --run-date "$RUN_DATE" \
+    --history-days 5
 
   echo "--------------------------------------------------"
   echo "STEP 3 COMPLETE"
+  echo "END: $(date '+%Y-%m-%d %H:%M:%S')"
+  echo "--------------------------------------------------"
+
+} >> "$LOG_DIR/exact_input_gate_$RUN_TS.log" 2>&1
+
+{
+  echo ""
+  echo "--------------------------------------------------"
+  echo "STEP 4: STRATEGY ENGINE RUN"
+  echo "START: $(date '+%Y-%m-%d %H:%M:%S')"
+  echo "--------------------------------------------------"
+
+  PYTHONPATH=.:services "$PYTHON_BIN" \
+    engines/strategy_deterministic_engine/scripts/run_strategy_engine_batch_from_db.py \
+    "$USER_ID" \
+    --run-date "$RUN_DATE" \
+    --history-days 5 \
+    --require-exact-contract-snapshot
+
+  echo "--------------------------------------------------"
+  echo "STEP 4 COMPLETE"
   echo "END: $(date '+%Y-%m-%d %H:%M:%S')"
   echo "--------------------------------------------------"
 
@@ -84,11 +125,3 @@ echo "==================================================" >> "$MASTER_LOG"
 echo "==================================================" >> "$MASTER_LOG"
 echo "STRATEGY DB PIPELINE FINISHED: $(date '+%Y-%m-%d_%H-%M-%S')" >> "$MASTER_LOG"
 echo "==================================================" >> "$MASTER_LOG"
-
-echo "STEP 4: EMAIL STRATEGY REPORT STARTED: $(date '+%Y-%m-%d %H:%M:%S')" >> "$MASTER_LOG"
-
-PYTHONPATH=.:services "$APP_DIR/venv/bin/python" \
-  engines/strategy_deterministic_engine/reports/email_strategy_report.py \
-  >> "$LOG_DIR/strategy_report_email_$RUN_TS.log" 2>&1
-
-echo "STEP 4: EMAIL STRATEGY REPORT FINISHED: $(date '+%Y-%m-%d %H:%M:%S')" >> "$MASTER_LOG"

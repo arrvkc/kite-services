@@ -4,8 +4,11 @@ from datetime import date, datetime, timezone
 from types import SimpleNamespace
 import unittest
 from unittest.mock import MagicMock
+from unittest.mock import patch
+import sys
 
 import pandas as pd
+from kiteconnect.exceptions import TokenException
 
 from engines.strategy_deterministic_engine.adapters.trend_identifier_adapter import (
     TrendIdentifierKiteAdapter,
@@ -15,7 +18,14 @@ from engines.strategy_deterministic_engine.adapters.trend_identifier_db_adapter 
 )
 from engines.strategy_deterministic_engine.db.upserts import (
     DELETE_STRATEGY_BATCH_RESULTS_FOR_DATE_SQL,
+    PREPARE_STRATEGY_RUN_SQL,
     persist_strict_trend_preparation,
+)
+from engines.strategy_deterministic_engine.scripts import (
+    sync_contract_snapshot_fo_universe_to_db as contract_sync,
+)
+from engines.strategy_deterministic_engine.scripts import (
+    sync_trend_history_fo_universe_to_db as trend_sync,
 )
 from engines.strategy_deterministic_engine.scripts.run_strategy_engine_batch_from_db import (
     build_argument_parser as strategy_parser,
@@ -398,6 +408,54 @@ class HistoricalBackfillContractTests(unittest.TestCase):
                 ["OMK569", "--run-date", "2026-08-20", "--require-exact-contract-snapshot"]
             ).require_exact_contract_snapshot
         )
+        self.assertTrue(
+            trend_parser().parse_args(
+                [
+                    "OMK569",
+                    "--end-date",
+                    "2026-08-31",
+                    "--strict",
+                    "--restart-unverified-completed-run",
+                ]
+            ).restart_unverified_completed_run
+        )
+
+    @patch.object(trend_sync, "get_engine")
+    @patch.object(trend_sync, "EquityTrendHistoryRunner")
+    @patch.object(trend_sync, "TrendIdentifierKiteAdapter")
+    @patch.object(trend_sync, "KiteConnect")
+    @patch.object(trend_sync, "get_kite_credentials", return_value=("key", "token"))
+    def test_trend_token_exception_aborts_universe_immediately(
+        self, _credentials, _kite, adapter_cls, runner_cls, _engine
+    ):
+        adapter_cls.return_value.get_fo_universe_symbols.return_value = ["A", "B"]
+        runner_cls.return_value.build_history_for_symbol.side_effect = TokenException(
+            "expired"
+        )
+        with patch.object(sys, "argv", ["sync", "OMK569"]):
+            with self.assertRaises(SystemExit) as raised:
+                trend_sync.main()
+        self.assertEqual(raised.exception.code, 1)
+        self.assertEqual(
+            runner_cls.return_value.build_history_for_symbol.call_count,
+            1,
+        )
+
+    @patch.object(contract_sync, "get_engine")
+    @patch.object(contract_sync, "TrendIdentifierKiteAdapter")
+    @patch.object(contract_sync, "KiteConnect")
+    @patch.object(contract_sync, "get_kite_credentials", return_value=("key", "token"))
+    def test_contract_token_exception_aborts_universe_immediately(
+        self, _credentials, _kite, adapter_cls, _engine
+    ):
+        adapter = adapter_cls.return_value
+        adapter.get_fo_universe_symbols.return_value = ["A", "B"]
+        adapter._build_latest_payload.side_effect = TokenException("expired")
+        with patch.object(sys, "argv", ["sync", "OMK569"]):
+            with self.assertRaises(SystemExit) as raised:
+                contract_sync.main()
+        self.assertEqual(raised.exception.code, 1)
+        self.assertEqual(adapter._build_latest_payload.call_count, 1)
 
     def test_strategy_restart_clears_stale_date_rows(self):
         self.assertIn(
@@ -510,6 +568,34 @@ class HistoricalBackfillContractTests(unittest.TestCase):
         self.assertEqual(manifest_params["requested_symbols_count"], 2)
         self.assertEqual(manifest_params["prepared_symbols_count"], 1)
         self.assertIn("NO_TRADING_ACTIVITY", manifest_params["input_exclusions_json"])
+        self.assertFalse(manifest_params["allow_unverified_completed_restart"])
+
+    def test_recovery_restart_is_limited_to_completed_runs_without_provenance(self):
+        sql = str(PREPARE_STRATEGY_RUN_SQL)
+        self.assertIn(":allow_unverified_completed_restart", sql)
+        self.assertIn("requested_symbols_count IS NULL", sql)
+        self.assertIn("prepared_symbols_count IS NULL", sql)
+        self.assertIn("evaluated_symbols_count IS NULL", sql)
+        self.assertIn("input_exclusions_json IS NULL", sql)
+
+        connection = MagicMock()
+        connection.execute.side_effect = [MagicMock(fetchone=lambda: (87,))]
+        transaction = MagicMock()
+        transaction.__enter__.return_value = connection
+        engine = MagicMock()
+        engine.begin.return_value = transaction
+        persist_strict_trend_preparation(
+            engine,
+            [],
+            run_date=date(2026, 8, 31),
+            generated_by_user_id="OMK569",
+            requested_symbols_count=0,
+            prepared_symbols_count=0,
+            exclusions=[],
+            allow_unverified_completed_restart=True,
+        )
+        params = connection.execute.call_args_list[0].args[1]
+        self.assertTrue(params["allow_unverified_completed_restart"])
 
     def test_undeclared_missing_prepared_symbol_is_rejected(self):
         with self.assertRaisesRegex(RuntimeError, "symbol sets differ"):
