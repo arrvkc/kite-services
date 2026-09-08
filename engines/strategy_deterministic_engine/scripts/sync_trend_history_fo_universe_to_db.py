@@ -16,6 +16,7 @@ from engines.strategy_deterministic_engine.adapters.trend_identifier_adapter imp
 from engines.trend_identifier.trend_identifier.runners.equity_trend_history_runner import (
     EquityTrendHistoryRunner,
     NoTradingActivityCandidate,
+    TargetDateHistoryUnavailableCandidate,
 )
 from engines.strategy_deterministic_engine.db.postgres import get_engine
 from engines.strategy_deterministic_engine.db.upserts import (
@@ -76,10 +77,51 @@ def no_trading_exclusion(candidate: NoTradingActivityCandidate) -> dict:
     }
 
 
+def target_date_unavailable_exclusion(
+    candidate: TargetDateHistoryUnavailableCandidate,
+) -> dict:
+    evidence = candidate.evidence
+    return {
+        "symbol": evidence.symbol,
+        "reason": candidate.reason,
+        "stage": "TREND_PREPARATION",
+        "target_date": evidence.target_date.isoformat(),
+        "selected_instrument": {
+            "exchange": evidence.exchange,
+            "tradingsymbol": evidence.tradingsymbol,
+            "instrument_token": evidence.instrument_token,
+        },
+        "evidence": {
+            "required_interval": evidence.required_interval,
+            "target_daily_candle_count": evidence.target_daily_candle_count,
+            "target_intraday_candle_count": evidence.target_intraday_candle_count,
+            "latest_daily_timestamp": evidence.latest_daily_timestamp,
+            "latest_intraday_timestamp": evidence.latest_intraday_timestamp,
+            "market_session_confirmation": "PREPARED_PEER_TARGET_SESSION",
+        },
+    }
+
+
+def preparation_exclusion(candidate) -> dict:
+    if isinstance(candidate, NoTradingActivityCandidate):
+        return no_trading_exclusion(candidate)
+    if isinstance(candidate, TargetDateHistoryUnavailableCandidate):
+        return target_date_unavailable_exclusion(candidate)
+    raise RuntimeError("Unsupported governed Trend preparation exclusion.")
+
+
+def exception_detail(exc: Exception) -> tuple[str, str]:
+    exception_type = type(exc).__name__
+    message = " ".join(str(exc).split()) or "No exception message supplied."
+    return exception_type, message[:500]
+
+
 def build_strict_preparation_manifest(
     requested_symbols: list[str],
     prepared_symbols: set[str],
-    candidates: list[NoTradingActivityCandidate],
+    candidates: list[
+        NoTradingActivityCandidate | TargetDateHistoryUnavailableCandidate
+    ],
     *,
     end_date: date,
 ) -> dict:
@@ -97,14 +139,21 @@ def build_strict_preparation_manifest(
         )
     for candidate in candidates:
         evidence = candidate.evidence
-        if (
-            evidence.target_date != end_date
-            or evidence.daily_volume != 0
-            or evidence.intraday_candle_count != 0
+        if evidence.target_date != end_date:
+            raise RuntimeError("No-trading evidence did not satisfy the strict contract.")
+        if isinstance(candidate, NoTradingActivityCandidate) and (
+            evidence.daily_volume != 0 or evidence.intraday_candle_count != 0
         ):
             raise RuntimeError("No-trading evidence did not satisfy the strict contract.")
+        if isinstance(candidate, TargetDateHistoryUnavailableCandidate) and (
+            evidence.target_daily_candle_count != 0
+            or evidence.target_intraday_candle_count != 0
+        ):
+            raise RuntimeError(
+                "Target-date-unavailable evidence did not satisfy the strict contract."
+            )
     exclusions = [
-        no_trading_exclusion(candidate)
+        preparation_exclusion(candidate)
         for candidate in sorted(candidates, key=lambda item: item.evidence.symbol)
     ]
     return {
@@ -188,7 +237,9 @@ def main() -> None:
     engine = None if args.dry_run else get_engine()
     total_rows = 0
     failures: list[dict] = []
-    no_trading_candidates: list[NoTradingActivityCandidate] = []
+    exclusion_candidates: list[
+        NoTradingActivityCandidate | TargetDateHistoryUnavailableCandidate
+    ] = []
     strict_rows: list[dict] = []
     prepared_symbols: set[str] = set()
 
@@ -227,19 +278,46 @@ def main() -> None:
 
         except NoTradingActivityCandidate as exc:
             if args.strict and end_date is not None:
-                no_trading_candidates.append(exc)
+                exclusion_candidates.append(exc)
                 print(
                     f"[{index}/{len(symbols)}] EXCLUDED {symbol}: {exc.reason}",
                     flush=True,
                 )
             else:
-                failures.append({"symbol": symbol, "error": type(exc).__name__})
+                exception_type, message = exception_detail(exc)
+                failures.append(
+                    {"symbol": symbol, "type": exception_type, "message": message}
+                )
                 print(
-                    f"[{index}/{len(symbols)}] FAIL {symbol}: {type(exc).__name__}",
+                    f"[{index}/{len(symbols)}] FAIL {symbol}: "
+                    f"{exception_type}: {message}",
+                    flush=True,
+                )
+        except TargetDateHistoryUnavailableCandidate as exc:
+            if args.strict and end_date is not None:
+                exclusion_candidates.append(exc)
+                print(
+                    f"[{index}/{len(symbols)}] EXCLUDED {symbol}: {exc.reason}",
+                    flush=True,
+                )
+            else:
+                exception_type, message = exception_detail(exc)
+                failures.append(
+                    {"symbol": symbol, "type": exception_type, "message": message}
+                )
+                print(
+                    f"[{index}/{len(symbols)}] FAIL {symbol}: "
+                    f"{exception_type}: {message}",
                     flush=True,
                 )
         except TokenException:
-            failures.append({"symbol": symbol, "error": "TokenException"})
+            failures.append(
+                {
+                    "symbol": symbol,
+                    "type": "TokenException",
+                    "message": "Kite authentication failed.",
+                }
+            )
             print(
                 f"[{index}/{len(symbols)}] FAIL {symbol}: TokenException",
                 flush=True,
@@ -247,13 +325,22 @@ def main() -> None:
             print("AUTHENTICATION_FAILURE aborting_universe_sync=YES", flush=True)
             raise SystemExit(1) from None
         except Exception as exc:
-            safe_error = type(exc).__name__
-            failures.append({"symbol": symbol, "error": safe_error})
-            print(f"[{index}/{len(symbols)}] FAIL {symbol}: {safe_error}", flush=True)
+            exception_type, message = exception_detail(exc)
+            failures.append(
+                {"symbol": symbol, "type": exception_type, "message": message}
+            )
+            print(
+                f"[{index}/{len(symbols)}] FAIL {symbol}: "
+                f"{exception_type}: {message}",
+                flush=True,
+            )
 
     if failures:
         for failure in failures[:20]:
-            print(f"FAILURE {failure['symbol']}: {failure['error']}")
+            print(
+                f"FAILURE {failure['symbol']}: {failure['type']}: "
+                f"{failure['message']}"
+            )
         if args.strict:
             raise SystemExit(1)
 
@@ -263,11 +350,14 @@ def main() -> None:
             manifest = build_strict_preparation_manifest(
                 symbols,
                 prepared_symbols,
-                no_trading_candidates,
+                exclusion_candidates,
                 end_date=end_date,
             )
         except RuntimeError as exc:
-            print(f"STRICT_PREPARATION_FAIL error={type(exc).__name__}")
+            exception_type, message = exception_detail(exc)
+            print(
+                f"STRICT_PREPARATION_FAIL error={exception_type}: {message}"
+            )
             raise SystemExit(1) from None
 
     if args.dry_run:
@@ -297,11 +387,33 @@ def main() -> None:
         print(
             "STRICT_PREPARATION "
             f"requested={len(symbols)} prepared={len(prepared_symbols)} "
-            f"no_trading_activity={len(no_trading_candidates)}"
+            f"governed_exclusions={len(exclusion_candidates)}"
         )
         print(
             "NO_TRADING_SYMBOLS="
-            + (",".join(sorted(item.evidence.symbol for item in no_trading_candidates)) or "NONE")
+            + (
+                ",".join(
+                    sorted(
+                        item.evidence.symbol
+                        for item in exclusion_candidates
+                        if isinstance(item, NoTradingActivityCandidate)
+                    )
+                )
+                or "NONE"
+            )
+        )
+        print(
+            "TARGET_DATE_HISTORY_UNAVAILABLE_SYMBOLS="
+            + (
+                ",".join(
+                    sorted(
+                        item.evidence.symbol
+                        for item in exclusion_candidates
+                        if isinstance(item, TargetDateHistoryUnavailableCandidate)
+                    )
+                )
+                or "NONE"
+            )
         )
         print("FAILURES count=0")
     else:

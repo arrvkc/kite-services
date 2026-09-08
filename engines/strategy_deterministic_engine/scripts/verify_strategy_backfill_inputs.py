@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter, defaultdict
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 import json
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import text
 
@@ -12,6 +13,10 @@ from engines.strategy_deterministic_engine.adapters.trend_identifier_db_adapter 
     TrendIdentifierDbAdapter,
 )
 from engines.strategy_deterministic_engine.db.postgres import get_engine
+from engines.trend_identifier.trend_identifier.runners.equity_trend_history_runner import (
+    GOVERNED_TARGET_DATE_UNAVAILABLE_SYMBOLS,
+    TARGET_DATE_HISTORY_UNAVAILABLE,
+)
 
 
 NO_TRADING_ACTIVITY = "NO_TRADING_ACTIVITY"
@@ -112,6 +117,60 @@ def validate_no_trading_exclusion(exclusion: dict, run_date: date) -> None:
         raise RuntimeError("No-trading exclusion evidence is incomplete or ambiguous.")
 
 
+def validate_target_date_unavailable_exclusion(
+    exclusion: dict, run_date: date
+) -> None:
+    if exclusion.get("reason") != TARGET_DATE_HISTORY_UNAVAILABLE:
+        raise RuntimeError("Input preparation contains an unsupported exclusion reason.")
+    if exclusion.get("stage") != "TREND_PREPARATION":
+        raise RuntimeError(
+            "Target-date-unavailable exclusion has an invalid preparation stage."
+        )
+    if exclusion.get("target_date") != run_date.isoformat():
+        raise RuntimeError(
+            "Target-date-unavailable exclusion date does not match the run date."
+        )
+    symbol = str(exclusion.get("symbol") or "").strip().upper()
+    if symbol not in GOVERNED_TARGET_DATE_UNAVAILABLE_SYMBOLS:
+        raise RuntimeError(
+            "Target-date-unavailable exclusion is not governed for this symbol."
+        )
+    instrument = exclusion.get("selected_instrument")
+    if not isinstance(instrument, dict) or not all(
+        instrument.get(key) not in (None, "")
+        for key in ("exchange", "tradingsymbol", "instrument_token")
+    ):
+        raise RuntimeError(
+            "Target-date-unavailable exclusion is missing selected instrument context."
+        )
+    evidence = exclusion.get("evidence")
+    if not isinstance(evidence, dict):
+        raise RuntimeError("Target-date-unavailable exclusion is missing evidence.")
+    try:
+        latest_daily = datetime.fromisoformat(
+            str(evidence["latest_daily_timestamp"]).replace("Z", "+00:00")
+        ).astimezone(ZoneInfo("Asia/Kolkata")).date()
+        latest_intraday = datetime.fromisoformat(
+            str(evidence["latest_intraday_timestamp"]).replace("Z", "+00:00")
+        ).astimezone(ZoneInfo("Asia/Kolkata")).date()
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError(
+            "Target-date-unavailable exclusion has invalid prior-source evidence."
+        ) from exc
+    if (
+        evidence.get("required_interval") != "60minute"
+        or evidence.get("target_daily_candle_count") != 0
+        or evidence.get("target_intraday_candle_count") != 0
+        or latest_daily >= run_date
+        or latest_intraday >= run_date
+        or evidence.get("market_session_confirmation")
+        != "PREPARED_PEER_TARGET_SESSION"
+    ):
+        raise RuntimeError(
+            "Target-date-unavailable exclusion evidence is incomplete or ambiguous."
+        )
+
+
 def load_input_preparation_manifest(connection, run_date: date) -> dict:
     row = connection.execute(
         text(
@@ -141,7 +200,14 @@ def load_input_preparation_manifest(connection, run_date: date) -> dict:
         if not isinstance(exclusion, dict):
             raise RuntimeError("Strategy input exclusion is malformed.")
         if exclusion.get("stage") == "TREND_PREPARATION":
-            validate_no_trading_exclusion(exclusion, run_date)
+            if exclusion.get("reason") == NO_TRADING_ACTIVITY:
+                validate_no_trading_exclusion(exclusion, run_date)
+            elif exclusion.get("reason") == TARGET_DATE_HISTORY_UNAVAILABLE:
+                validate_target_date_unavailable_exclusion(exclusion, run_date)
+            else:
+                raise RuntimeError(
+                    "Input preparation contains an unsupported exclusion reason."
+                )
             preparation_exclusions.append(exclusion)
         elif (
             exclusion.get("stage") == "STRATEGY_INPUT"
@@ -177,14 +243,16 @@ def load_input_preparation_manifest(connection, run_date: date) -> dict:
 def validate_preparation_symbol_coverage(
     trend_symbols: set[str],
     contract_symbols: set[str],
-    no_trading_symbols: set[str],
+    preparation_exclusion_symbols: set[str],
     *,
     requested_symbols_count: int,
     prepared_symbols_count: int,
 ) -> None:
-    if trend_symbols & no_trading_symbols:
-        raise RuntimeError("A no-trading exclusion also has a target-date Trend row.")
-    if trend_symbols | no_trading_symbols != contract_symbols:
+    if trend_symbols & preparation_exclusion_symbols:
+        raise RuntimeError(
+            "A Trend preparation exclusion also has a target-date Trend row."
+        )
+    if trend_symbols | preparation_exclusion_symbols != contract_symbols:
         raise RuntimeError(
             "Exact target-date Trend, exclusion, and contract symbol sets differ."
         )
@@ -273,13 +341,13 @@ def verify_inputs(engine, run_date: date, history_days: int = 5) -> dict:
 
     if not trend_symbols:
         raise RuntimeError("Exact target-date Trend History has no symbols.")
-    no_trading_symbols = {
+    preparation_exclusion_symbols = {
         str(item["symbol"]).upper() for item in preparation["exclusions"]
     }
     validate_preparation_symbol_coverage(
         trend_symbols,
         contract_symbols,
-        no_trading_symbols,
+        preparation_exclusion_symbols,
         requested_symbols_count=preparation["requested_symbols_count"],
         prepared_symbols_count=preparation["prepared_symbols_count"],
     )
@@ -326,8 +394,24 @@ def verify_inputs(engine, run_date: date, history_days: int = 5) -> dict:
         "strategy_input_count": len(strategy_inputs),
         "strategy_input_exclusion_count": len(all_exclusions),
         "strategy_input_exclusions": all_exclusions,
-        "no_trading_activity_count": len(no_trading_symbols),
-        "no_trading_activity_symbols": sorted(no_trading_symbols),
+        "no_trading_activity_count": sum(
+            item["reason"] == NO_TRADING_ACTIVITY
+            for item in preparation["exclusions"]
+        ),
+        "no_trading_activity_symbols": sorted(
+            str(item["symbol"]).upper()
+            for item in preparation["exclusions"]
+            if item["reason"] == NO_TRADING_ACTIVITY
+        ),
+        "target_date_history_unavailable_count": sum(
+            item["reason"] == TARGET_DATE_HISTORY_UNAVAILABLE
+            for item in preparation["exclusions"]
+        ),
+        "target_date_history_unavailable_symbols": sorted(
+            str(item["symbol"]).upper()
+            for item in preparation["exclusions"]
+            if item["reason"] == TARGET_DATE_HISTORY_UNAVAILABLE
+        ),
         "contract_snapshot_exact": True,
         "future_trend_rows_selected": 0,
     }

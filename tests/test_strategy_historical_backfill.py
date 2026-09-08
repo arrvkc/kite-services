@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
+from contextlib import redirect_stdout
+import io
 from types import SimpleNamespace
 import unittest
 from unittest.mock import MagicMock
@@ -36,17 +38,21 @@ from engines.strategy_deterministic_engine.scripts.sync_contract_snapshot_fo_uni
 from engines.strategy_deterministic_engine.scripts.sync_trend_history_fo_universe_to_db import (
     build_strict_preparation_manifest,
     build_argument_parser as trend_parser,
+    exception_detail,
 )
 from engines.strategy_deterministic_engine.scripts.verify_strategy_backfill_inputs import (
     build_trend_date_patterns,
     validate_no_trading_exclusion,
     validate_preparation_symbol_coverage,
     validate_strategy_input_coverage,
+    validate_target_date_unavailable_exclusion,
 )
 from engines.trend_identifier.trend_identifier.runners.equity_trend_history_runner import (
     EquityTrendHistoryRunner,
     NoTradingActivityCandidate,
     NoTradingActivityEvidence,
+    TargetDateHistoryUnavailableCandidate,
+    TargetDateHistoryUnavailableEvidence,
 )
 
 
@@ -96,7 +102,7 @@ class CapturingDbAdapter(TrendIdentifierDbAdapter):
 
 
 class HistoricalBackfillContractTests(unittest.TestCase):
-    def test_niftyfpi_nfo_only_resolution_reproduces_missing_target_session(self):
+    def test_niftyfpi_missing_target_source_is_governed_exclusion_candidate(self):
         kite = MagicMock()
 
         def instruments(exchange):
@@ -145,13 +151,17 @@ class HistoricalBackfillContractTests(unittest.TestCase):
         self.assertEqual(resolved.exchange, "NFO")
         self.assertEqual(resolved.tradingsymbol, "NIFTYFPI26SEPFUT")
 
-        with self.assertRaisesRegex(
-            RuntimeError,
-            r"No completed market session found for NIFTYFPI on 2026-08-27\.",
-        ):
+        with self.assertRaises(TargetDateHistoryUnavailableCandidate) as raised:
             runner.build_history_for_symbol(
                 "NIFTYFPI", history_days=5, end_date=date(2026, 8, 27)
             )
+
+        evidence = raised.exception.evidence
+        self.assertEqual(raised.exception.reason, "TARGET_DATE_HISTORY_UNAVAILABLE")
+        self.assertEqual(evidence.target_daily_candle_count, 0)
+        self.assertEqual(evidence.target_intraday_candle_count, 0)
+        self.assertIn("2026-08-26", evidence.latest_daily_timestamp)
+        self.assertIn("2026-08-26", evidence.latest_intraday_timestamp)
 
         self.assertTrue(kite.historical_data.called)
         self.assertTrue(
@@ -160,6 +170,50 @@ class HistoricalBackfillContractTests(unittest.TestCase):
                 for call in kite.historical_data.call_args_list
             )
         )
+
+        manifest = build_strict_preparation_manifest(
+            ["ABC", "NIFTYFPI"],
+            {"ABC"},
+            [raised.exception],
+            end_date=date(2026, 8, 27),
+        )
+        exclusion = manifest["exclusions"][0]
+        self.assertEqual(exclusion["reason"], "TARGET_DATE_HISTORY_UNAVAILABLE")
+        validate_target_date_unavailable_exclusion(exclusion, date(2026, 8, 27))
+
+    def test_missing_target_source_for_unallowlisted_symbol_fails_closed(self):
+        runner = EquityTrendHistoryRunner.__new__(EquityTrendHistoryRunner)
+        runner.exchange = "NSE"
+        equity = MagicMock()
+        runner.equity_runner = equity
+        equity.build_raw_bars_for_symbol_asof.return_value = (
+            {
+                "hourly": pd.DataFrame(
+                    {
+                        "timestamp": pd.to_datetime(
+                            ["2026-08-26T09:45:00Z"], utc=True
+                        )
+                    }
+                ),
+                "daily": pd.DataFrame(
+                    {
+                        "timestamp": pd.to_datetime(
+                            ["2026-08-26T00:00:00+05:30"], utc=True
+                        ),
+                        "volume": [1],
+                    }
+                ),
+            },
+            {
+                "resolved_exchange": "NFO",
+                "resolved_tradingsymbol": "OTHER26SEPFUT",
+                "instrument_token": 99,
+            },
+        )
+        with self.assertRaisesRegex(RuntimeError, "No completed market session"):
+            runner.build_history_for_symbol(
+                "OTHER", history_days=1, end_date=date(2026, 8, 27)
+            )
 
     def test_zero_volume_daily_without_hourly_is_audited_no_trading_candidate(self):
         kite = MagicMock()
@@ -276,6 +330,164 @@ class HistoricalBackfillContractTests(unittest.TestCase):
             runner.build_history_for_symbol(
                 "NEW", history_days=1, end_date=date(2026, 8, 27)
             )
+
+    def test_failure_logging_retains_exception_type_and_message(self):
+        exception_type, message = exception_detail(
+            RuntimeError("No completed market session found for OTHER on 2026-08-27.")
+        )
+        self.assertEqual(exception_type, "RuntimeError")
+        self.assertEqual(
+            message,
+            "No completed market session found for OTHER on 2026-08-27.",
+        )
+
+    @patch.object(trend_sync, "persist_strict_trend_preparation", return_value=1)
+    @patch.object(trend_sync, "get_engine", return_value=object())
+    @patch.object(trend_sync, "EquityTrendHistoryRunner")
+    @patch.object(trend_sync, "TrendIdentifierKiteAdapter")
+    @patch.object(trend_sync, "KiteConnect")
+    @patch.object(trend_sync, "get_kite_credentials", return_value=("key", "token"))
+    def test_governed_target_date_exclusion_continues_without_synthetic_row(
+        self,
+        _credentials,
+        _kite,
+        adapter_cls,
+        runner_cls,
+        _engine,
+        persist_preparation,
+    ):
+        adapter_cls.return_value.get_fo_universe_symbols.return_value = [
+            "ABC",
+            "NIFTYFPI",
+        ]
+        valid_result = SimpleNamespace(
+            symbol="ABC",
+            exchange="NSE",
+            tradingsymbol="ABC",
+            instrument_token=1,
+            history=pd.DataFrame(
+                [
+                    {
+                        "date": "2026-09-08",
+                        "close": 100,
+                        "label": "UP",
+                        "confidence": 0.8,
+                        "aggregate_score": 0.5,
+                        "internal_state": "CLASSIFIABLE",
+                    }
+                ]
+            ),
+        )
+        unavailable = TargetDateHistoryUnavailableCandidate(
+            TargetDateHistoryUnavailableEvidence(
+                symbol="NIFTYFPI",
+                target_date=date(2026, 9, 8),
+                exchange="NFO",
+                tradingsymbol="NIFTYFPI26SEPFUT",
+                instrument_token=9200130,
+                required_interval="60minute",
+                target_daily_candle_count=0,
+                target_intraday_candle_count=0,
+                latest_daily_timestamp="2026-09-07T00:00:00+05:30",
+                latest_intraday_timestamp="2026-09-07T15:15:00+05:30",
+            )
+        )
+        runner_cls.return_value.build_history_for_symbol.side_effect = [
+            valid_result,
+            unavailable,
+        ]
+
+        with patch.object(
+            sys,
+            "argv",
+            ["sync", "OMK569", "--end-date", "2026-09-08", "--strict"],
+        ):
+            trend_sync.main()
+
+        persisted_rows = persist_preparation.call_args.args[1]
+        self.assertEqual([row["symbol"] for row in persisted_rows], ["ABC"])
+        exclusions = persist_preparation.call_args.kwargs["exclusions"]
+        self.assertEqual(len(exclusions), 1)
+        self.assertEqual(exclusions[0]["symbol"], "NIFTYFPI")
+        self.assertEqual(
+            exclusions[0]["reason"], "TARGET_DATE_HISTORY_UNAVAILABLE"
+        )
+
+    @patch.object(trend_sync, "persist_strict_trend_preparation")
+    @patch.object(trend_sync, "get_engine", return_value=object())
+    @patch.object(trend_sync, "EquityTrendHistoryRunner")
+    @patch.object(trend_sync, "TrendIdentifierKiteAdapter")
+    @patch.object(trend_sync, "KiteConnect")
+    @patch.object(trend_sync, "get_kite_credentials", return_value=("key", "token"))
+    def test_unexpected_runtime_error_still_fails_strict_pipeline_with_message(
+        self,
+        _credentials,
+        _kite,
+        adapter_cls,
+        runner_cls,
+        _engine,
+        persist_preparation,
+    ):
+        adapter_cls.return_value.get_fo_universe_symbols.return_value = ["OTHER"]
+        runner_cls.return_value.build_history_for_symbol.side_effect = RuntimeError(
+            "unexpected source failure"
+        )
+        output = io.StringIO()
+        with patch.object(
+            sys,
+            "argv",
+            ["sync", "OMK569", "--end-date", "2026-09-08", "--strict"],
+        ):
+            with redirect_stdout(output), self.assertRaises(SystemExit) as raised:
+                trend_sync.main()
+        self.assertEqual(raised.exception.code, 1)
+        self.assertIn(
+            "OTHER: RuntimeError: unexpected source failure", output.getvalue()
+        )
+        persist_preparation.assert_not_called()
+
+    @patch.object(trend_sync, "persist_strict_trend_preparation")
+    @patch.object(trend_sync, "get_engine", return_value=object())
+    @patch.object(trend_sync, "EquityTrendHistoryRunner")
+    @patch.object(trend_sync, "TrendIdentifierKiteAdapter")
+    @patch.object(trend_sync, "KiteConnect")
+    @patch.object(trend_sync, "get_kite_credentials", return_value=("key", "token"))
+    def test_database_persistence_failure_still_fails_pipeline(
+        self,
+        _credentials,
+        _kite,
+        adapter_cls,
+        runner_cls,
+        _engine,
+        persist_preparation,
+    ):
+        adapter_cls.return_value.get_fo_universe_symbols.return_value = ["ABC"]
+        runner_cls.return_value.build_history_for_symbol.return_value = SimpleNamespace(
+            symbol="ABC",
+            exchange="NSE",
+            tradingsymbol="ABC",
+            instrument_token=1,
+            history=pd.DataFrame(
+                [
+                    {
+                        "date": "2026-09-08",
+                        "close": 100,
+                        "label": "UP",
+                        "confidence": 0.8,
+                        "aggregate_score": 0.5,
+                        "internal_state": "CLASSIFIABLE",
+                    }
+                ]
+            ),
+        )
+        persist_preparation.side_effect = RuntimeError("database unavailable")
+        with patch.object(
+            sys,
+            "argv",
+            ["sync", "OMK569", "--end-date", "2026-09-08", "--strict"],
+        ):
+            with self.assertRaisesRegex(RuntimeError, "database unavailable"):
+                trend_sync.main()
 
     def test_history_runner_bounds_cut_points_to_explicit_end_date(self):
         runner = EquityTrendHistoryRunner.__new__(EquityTrendHistoryRunner)
@@ -524,6 +736,28 @@ class HistoricalBackfillContractTests(unittest.TestCase):
             requested_symbols_count=2,
             prepared_symbols_count=1,
         )
+
+    def test_target_date_unavailable_exclusion_is_symbol_scoped(self):
+        evidence = TargetDateHistoryUnavailableEvidence(
+            symbol="OTHER",
+            target_date=date(2026, 9, 8),
+            exchange="NFO",
+            tradingsymbol="OTHER26SEPFUT",
+            instrument_token=99,
+            required_interval="60minute",
+            target_daily_candle_count=0,
+            target_intraday_candle_count=0,
+            latest_daily_timestamp="2026-09-07T00:00:00+05:30",
+            latest_intraday_timestamp="2026-09-07T15:15:00+05:30",
+        )
+        exclusion = build_strict_preparation_manifest(
+            ["ABC", "OTHER"],
+            {"ABC"},
+            [TargetDateHistoryUnavailableCandidate(evidence)],
+            end_date=date(2026, 9, 8),
+        )["exclusions"][0]
+        with self.assertRaisesRegex(RuntimeError, "not governed"):
+            validate_target_date_unavailable_exclusion(exclusion, date(2026, 9, 8))
 
     def test_strict_preparation_persists_rows_and_manifest_atomically(self):
         connection = MagicMock()

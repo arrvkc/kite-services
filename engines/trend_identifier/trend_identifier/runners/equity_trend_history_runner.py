@@ -12,6 +12,10 @@ from .equity_trend_runner import EquityTrendRunner
 
 
 NO_TRADING_ACTIVITY = "NO_TRADING_ACTIVITY"
+TARGET_DATE_HISTORY_UNAVAILABLE = "TARGET_DATE_HISTORY_UNAVAILABLE"
+# This is deliberately symbol-scoped. Missing target bars for any other symbol
+# remain an unexpected fatal error until separately governed with evidence.
+GOVERNED_TARGET_DATE_UNAVAILABLE_SYMBOLS = frozenset({"NIFTYFPI"})
 
 
 @dataclass(frozen=True)
@@ -51,6 +55,34 @@ class NoTradingActivityCandidate(RuntimeError):
         super().__init__(
             f"{evidence.symbol} has a zero-volume daily candle and no "
             f"{evidence.required_interval} bars on {evidence.target_date}."
+        )
+
+
+@dataclass(frozen=True)
+class TargetDateHistoryUnavailableEvidence:
+    symbol: str
+    target_date: date
+    exchange: str
+    tradingsymbol: str
+    instrument_token: int
+    required_interval: str
+    target_daily_candle_count: int
+    target_intraday_candle_count: int
+    latest_daily_timestamp: str
+    latest_intraday_timestamp: str
+
+
+class TargetDateHistoryUnavailableCandidate(RuntimeError):
+    """Allowlisted symbol lacks both target-date daily and intraday evidence."""
+
+    reason = TARGET_DATE_HISTORY_UNAVAILABLE
+
+    def __init__(self, evidence: TargetDateHistoryUnavailableEvidence) -> None:
+        self.evidence = evidence
+        super().__init__(
+            f"{evidence.symbol} has no daily or {evidence.required_interval} "
+            f"observations on {evidence.target_date}; latest source observations "
+            "predate the target session."
         )
 
 
@@ -151,6 +183,34 @@ class EquityTrendHistoryRunner:
                             daily_oi=daily_row.get("oi"),
                         )
                     )
+            normalized_symbol = symbol.strip().upper()
+            if (
+                target_hourly.empty
+                and target_daily.empty
+                and normalized_symbol in GOVERNED_TARGET_DATE_UNAVAILABLE_SYMBOLS
+                and not hourly.empty
+                and not daily.empty
+            ):
+                raise TargetDateHistoryUnavailableCandidate(
+                    TargetDateHistoryUnavailableEvidence(
+                        symbol=normalized_symbol,
+                        target_date=target_date,
+                        exchange=str(instrument_metadata["resolved_exchange"]),
+                        tradingsymbol=str(
+                            instrument_metadata["resolved_tradingsymbol"]
+                        ),
+                        instrument_token=int(instrument_metadata["instrument_token"]),
+                        required_interval="60minute",
+                        target_daily_candle_count=0,
+                        target_intraday_candle_count=0,
+                        latest_daily_timestamp=pd.Timestamp(
+                            daily["timestamp"].max()
+                        ).isoformat(),
+                        latest_intraday_timestamp=pd.Timestamp(
+                            hourly["timestamp"].max()
+                        ).isoformat(),
+                    )
+                )
 
         if hourly.empty:
             raise RuntimeError(f"No hourly bars found for {symbol}.")
