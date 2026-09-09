@@ -844,9 +844,10 @@ class OptionsConstructionEngine:
             max_profit = width - net_debit
             if max_loss <= 0 or not math.isfinite(max_loss):
                 return None, INVALID_MAX_LOSS
+            # A debit consuming the whole payoff is invalid, independently of R/R.
+            if max_profit <= 0 or not math.isfinite(max_profit):
+                return None, INVALID_NET_PREMIUM
             rr = max_profit / max_loss
-            if rr < 1.0:
-                return None, POOR_REWARD_RISK
             return CandidateEconomics(net_debit, width, max_loss, max_profit, max_loss * lot_size, max_profit * lot_size, rr), PREMIUM_CHECK_PASSED
 
         if family == FAMILY_IRON_CONDOR:

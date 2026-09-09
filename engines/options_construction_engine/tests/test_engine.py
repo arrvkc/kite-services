@@ -6,6 +6,8 @@ from pathlib import Path
 from decimal import Decimal
 from types import SimpleNamespace
 
+import pytest
+
 from engines.options_construction_engine.constants import *
 from engines.options_construction_engine.contract import (
     CONTRACT_IDENTITY,
@@ -183,7 +185,9 @@ def test_tc_005_credit_too_low():
     assert CREDIT_TOO_LOW in result["reason_codes"]
 
 
-def test_tc_006_debit_spread_reward_risk_below_threshold():
+@pytest.mark.parametrize("family", [FAMILY_BULL_CALL_SPREAD, FAMILY_BEAR_PUT_SPREAD])
+@pytest.mark.parametrize("buy_ask", [6.0, 9.0, 9.6])
+def test_tc_006_debit_spread_reward_risk_is_informational(family, buy_ask):
     payload = {
         "instrument": "ABC", "asof_time": "2026-04-15T10:30:00Z", "strategy_family": FAMILY_BULL_CALL_SPREAD,
         "contract_month_selection": CONTRACT_NEAR_MONTH, "final_strategy_strength": 70,
@@ -193,9 +197,42 @@ def test_tc_006_debit_spread_reward_risk_below_threshold():
         {"tradingsymbol": "ABC24MAY150CE", "instrument_token": 3001, "expiry": "2026-05-28", "strike": 150, "option_type": "CE", "bid_price": 9.4, "ask_price": 9.6, "last_price": 9.5, "open_interest": 2500, "volume": 700, "delta": 0.50, "data_timestamp": "2026-04-15T10:29:00Z"},
         {"tradingsymbol": "ABC24MAY160CE", "instrument_token": 3002, "expiry": "2026-05-28", "strike": 160, "option_type": "CE", "bid_price": 4.0, "ask_price": 4.2, "last_price": 4.1, "open_interest": 2500, "volume": 700, "delta": 0.30, "data_timestamp": "2026-04-15T10:29:00Z"},
     ]
-    result = OptionsConstructionEngine().construct(payload, chain)
+    payload["strategy_family"] = family
+    chain[0].update(bid_price=buy_ask - 0.2, ask_price=buy_ask, last_price=buy_ask - 0.1)
+    if family == FAMILY_BEAR_PUT_SPREAD:
+        for leg in chain:
+            leg["option_type"] = "PE"
+            leg["tradingsymbol"] = leg["tradingsymbol"].replace("CE", "PE")
+            leg["delta"] = -leg["delta"]
+        chain[1]["strike"] = 140
+        chain[1]["tradingsymbol"] = "ABC24MAY140PE"
+    result = OptionsConstructionEngine().construct(payload, chain, include_scored_candidates=True)
+    assert result["construction_status"] == STATUS_CONSTRUCTED
+    assert POOR_REWARD_RISK not in result["reason_codes"]
+    candidate = result["scored_candidates"][0]
+    debit = buy_ask - 4.0
+    assert candidate["net_premium"] == pytest.approx(debit)
+    assert candidate["max_loss_per_lot"] == pytest.approx(debit * 100)
+    assert candidate["max_profit_per_lot"] == pytest.approx((10 - debit) * 100)
+    assert candidate["reward_risk_ratio"] == pytest.approx((10 - debit) / debit)
+    assert result == OptionsConstructionEngine().construct(payload, chain, include_scored_candidates=True)
+
+
+@pytest.mark.parametrize("buy_ask", [3.0, 14.0, 16.0])
+def test_debit_spread_invalid_premium_or_payoff_still_rejected(buy_ask):
+    payload = dict(instrument="ABC", asof_time="2026-04-15T10:30:00Z",
+                   strategy_family=FAMILY_BULL_CALL_SPREAD, contract_month_selection=CONTRACT_NEAR_MONTH,
+                   final_strategy_strength=70, underlying_spot_price=150.0, lot_size=100, strike_step=5)
+    chain = [dict(tradingsymbol=f"ABC{strike}CE", instrument_token=strike, expiry="2026-05-28",
+                  strike=strike, option_type="CE", bid_price=bid, ask_price=ask, last_price=bid,
+                  open_interest=2500, volume=700, delta=delta, data_timestamp="2026-04-15T10:29:00Z")
+             for strike, bid, ask, delta in [(150, buy_ask - 0.2, buy_ask, 0.5), (160, 4.0, 4.2, 0.3)]]
+    result = OptionsConstructionEngine().construct(payload, chain, include_scored_candidates=True)
     assert result["construction_status"] == STATUS_REJECTED
-    assert POOR_REWARD_RISK in result["reason_codes"]
+    assert INVALID_NET_PREMIUM in result["reason_codes"]
+    assert POOR_REWARD_RISK not in result["reason_codes"]
+    assert result["legs"] == []
+    assert result["max_profit_per_lot"] is None
 
 
 def test_tc_007_tie_break_selects_lower_bid_ask_spread():
