@@ -798,8 +798,15 @@ class OptionsConstructionEngine:
         )
 
     # Section 11 / Section 17 Stages 7-8.
-    def _price_and_risk(self, payload: dict[str, Any], candidate: Candidate) -> tuple[Optional[CandidateEconomics], str]:
+    def _price_and_risk(self, payload: dict[str, Any], candidate: Candidate, *, policy: str = "AUTOMATIC") -> tuple[Optional[CandidateEconomics], str]:
         family = payload["strategy_family"]
+        if policy not in {"AUTOMATIC", "USER_FIRST"} or (
+            policy == "USER_FIRST" and family not in {
+                FAMILY_BEAR_CALL_SPREAD, FAMILY_BULL_PUT_SPREAD,
+                FAMILY_BEAR_PUT_SPREAD, FAMILY_IRON_CONDOR,
+            }
+        ):
+            raise ValueError("Unsupported construction policy for this family.")
         lot_size = int(payload["lot_size"])
 
         sells = [leg.contract for leg in candidate.legs if leg.side == SIDE_SELL]
@@ -824,7 +831,7 @@ class OptionsConstructionEngine:
             width = abs(long.strike - short.strike)
             if net_credit <= 0:
                 return None, INVALID_NET_PREMIUM
-            if net_credit < 0.20 * width:
+            if policy == "AUTOMATIC" and net_credit < 0.20 * width:
                 return None, CREDIT_TOO_LOW
             max_loss = width - net_credit
             if max_loss <= 0 or not math.isfinite(max_loss):
@@ -860,7 +867,7 @@ class OptionsConstructionEngine:
             width = max(put_width, call_width)
             if net_credit <= 0:
                 return None, INVALID_NET_PREMIUM
-            if net_credit < 0.20 * width:
+            if policy == "AUTOMATIC" and net_credit < 0.20 * width:
                 return None, CREDIT_TOO_LOW
             max_loss = width - net_credit
             if max_loss <= 0 or not math.isfinite(max_loss):
