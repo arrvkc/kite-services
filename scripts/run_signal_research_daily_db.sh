@@ -40,6 +40,7 @@ WITH base AS (
             SELECT th.close
             FROM trend_history_fo_universe th
             WHERE th.symbol = s.symbol
+              AND th.user_id = strategy_run.generated_by_user_id
               AND th.trade_date <= s.run_date
             ORDER BY th.trade_date DESC
             LIMIT 1
@@ -62,6 +63,10 @@ WITH base AS (
             ELSE s.run_date + 10
         END AS expiry_date
     FROM strategy_deterministic_engine_batch_results s
+    JOIN strategy_deterministic_engine_runs strategy_run
+      ON strategy_run.id = s.run_id
+     AND strategy_run.run_date = s.run_date
+     AND strategy_run.generated_by_user_id IS NOT NULL
     WHERE NULLIF(:'recovery_run_date', '') IS NULL
        OR s.run_date = NULLIF(:'recovery_run_date', '')::date
 )
@@ -103,8 +108,12 @@ WITH raw AS (
         th.close,
         ROUND(((th.close - e.entry_price) / e.entry_price) * 100, 2) AS return_pct
     FROM signal_trade_entries e
+    JOIN strategy_deterministic_engine_runs strategy_run
+      ON strategy_run.run_date = e.source_run_date
+     AND strategy_run.generated_by_user_id IS NOT NULL
     JOIN trend_history_fo_universe th
       ON th.symbol = e.symbol
+     AND th.user_id = strategy_run.generated_by_user_id
      AND th.trade_date > e.entry_date
      AND th.trade_date <= e.expiry_date
     WHERE NULLIF(:'recovery_run_date', '') IS NULL
@@ -167,8 +176,14 @@ INSERT INTO signal_trade_outcomes (
     final_result
 )
 WITH latest_market AS (
-    SELECT MAX(trade_date) AS latest_trade_date
-    FROM trend_history_fo_universe
+    SELECT
+        strategy_run.run_date,
+        MAX(th.trade_date) AS latest_trade_date
+    FROM strategy_deterministic_engine_runs strategy_run
+    JOIN trend_history_fo_universe th
+      ON th.user_id = strategy_run.generated_by_user_id
+    WHERE strategy_run.generated_by_user_id IS NOT NULL
+    GROUP BY strategy_run.run_date
 ),
 first_hit AS (
     SELECT
@@ -218,7 +233,8 @@ summary AS (
       ON fh.trade_entry_id = e.id
     LEFT JOIN latest_obs lo
       ON lo.trade_entry_id = e.id
-    CROSS JOIN latest_market lm
+    JOIN latest_market lm
+      ON lm.run_date = e.source_run_date
     WHERE NULLIF(:'recovery_run_date', '') IS NULL
        OR e.source_run_date = NULLIF(:'recovery_run_date', '')::date
     GROUP BY
