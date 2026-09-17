@@ -27,6 +27,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
         description="Verify exact-date Strategy recovery inputs without writing data."
     )
     parser.add_argument("--run-date", required=True)
+    parser.add_argument("--user-id", required=True)
     parser.add_argument("--history-days", type=int, default=5)
     return parser
 
@@ -171,10 +172,10 @@ def validate_target_date_unavailable_exclusion(
         )
 
 
-def load_input_preparation_manifest(connection, run_date: date) -> dict:
+def load_input_preparation_manifest(connection, run_date: date, user_id: str) -> dict:
     row = connection.execute(
         text(
-            "SELECT status, requested_symbols_count, prepared_symbols_count, "
+            "SELECT status, generated_by_user_id, requested_symbols_count, prepared_symbols_count, "
             "       evaluated_symbols_count, input_exclusion_count, "
             "       input_exclusions_json "
             "FROM strategy_deterministic_engine_runs WHERE run_date = :run_date"
@@ -185,6 +186,10 @@ def load_input_preparation_manifest(connection, run_date: date) -> dict:
         raise RuntimeError("Exact-date Strategy input preparation audit is missing.")
     if row["status"] not in {"INPUTS_PREPARED", "STARTED", "COMPLETED"}:
         raise RuntimeError("Exact-date Strategy input preparation status is invalid.")
+    if str(row["generated_by_user_id"] or "").strip().upper() != user_id:
+        raise RuntimeError(
+            "Exact-date Strategy input preparation belongs to another account."
+        )
     try:
         exclusions = json.loads(row["input_exclusions_json"] or "[]")
     except (TypeError, ValueError) as exc:
@@ -262,82 +267,41 @@ def validate_preparation_symbol_coverage(
         raise RuntimeError("Requested Strategy count does not match contract universe.")
 
 
-def verify_inputs(engine, run_date: date, history_days: int = 5) -> dict:
+def verify_inputs(
+    engine,
+    run_date: date,
+    user_id: str,
+    history_days: int = 5,
+) -> dict:
+    user_id = str(user_id).strip().upper()
+    if not user_id:
+        raise ValueError("An authoritative Strategy user id is required.")
     with engine.connect() as connection:
-        preparation = load_input_preparation_manifest(connection, run_date)
-        trend_symbols = {
-            row[0]
-            for row in connection.execute(
-                text(
-                    "SELECT DISTINCT symbol FROM trend_history_fo_universe "
-                    "WHERE trade_date = :run_date"
-                ),
-                {"run_date": run_date},
-            )
-        }
-        contract_symbols = {
-            row[0]
-            for row in connection.execute(
-                text(
-                    "SELECT DISTINCT symbol FROM contract_snapshot_fo_universe "
-                    "WHERE selection_date = :run_date"
-                ),
-                {"run_date": run_date},
-            )
-        }
-        selected_trend_rows = connection.execute(
-            text(
-                "WITH target_symbols AS ("
-                "  SELECT DISTINCT symbol FROM trend_history_fo_universe "
-                "  WHERE trade_date = :run_date"
-                "), ranked AS ("
-                "  SELECT history.symbol, history.trade_date, "
-                "         ROW_NUMBER() OVER ("
-                "           PARTITION BY history.symbol "
-                "           ORDER BY history.trade_date DESC"
-                "         ) AS session_rank "
-                "  FROM trend_history_fo_universe AS history "
-                "  JOIN target_symbols USING (symbol) "
-                "  WHERE history.trade_date <= :run_date"
-                ") "
-                "SELECT symbol, trade_date FROM ranked "
-                "WHERE session_rank <= :history_days "
-                "ORDER BY symbol, trade_date"
-            ),
-            {"run_date": run_date, "history_days": history_days},
-        ).fetchall()
-        null_score_symbols = {
-            row[0]
-            for row in connection.execute(
-                text(
-                    "WITH target_symbols AS ("
-                    "  SELECT DISTINCT symbol FROM trend_history_fo_universe "
-                    "  WHERE trade_date = :run_date"
-                    "), ranked AS ("
-                    "  SELECT history.symbol, history.aggregate_score, "
-                    "         ROW_NUMBER() OVER ("
-                    "           PARTITION BY history.symbol "
-                    "           ORDER BY history.trade_date DESC"
-                    "         ) AS session_rank "
-                    "  FROM trend_history_fo_universe AS history "
-                    "  JOIN target_symbols USING (symbol) "
-                    "  WHERE history.trade_date <= :run_date"
-                    ") "
-                    "SELECT symbol FROM ranked "
-                    "WHERE session_rank <= :history_days "
-                    "GROUP BY symbol "
-                    "HAVING COUNT(*) FILTER (WHERE aggregate_score IS NULL) > 0"
-                ),
-                {"run_date": run_date, "history_days": history_days},
-            )
-        }
-        contract_row_count = connection.execute(
-            text(
-                "SELECT COUNT(*) FROM contract_snapshot_fo_universe "
-                "WHERE selection_date = :run_date"
-            ),
-            {"run_date": run_date},
-        ).scalar_one()
+        preparation = load_input_preparation_manifest(connection, run_date, user_id)
+
+    adapter = TrendIdentifierDbAdapter(
+        engine=engine,
+        run_date=run_date,
+        user_id=user_id,
+        history_days=history_days,
+        require_exact_contract_snapshot=True,
+    )
+    trend_df, contract_df = adapter.load_source_frames()
+    trend_symbols = set(trend_df["symbol"].astype(str)) if not trend_df.empty else set()
+    contract_symbols = (
+        set(contract_df["symbol"].astype(str)) if not contract_df.empty else set()
+    )
+    selected_trend_rows = list(
+        trend_df[["symbol", "date"]].itertuples(index=False, name=None)
+    )
+    null_score_symbols = (
+        set(
+            trend_df.loc[trend_df["aggregate_score"].isna(), "symbol"].astype(str)
+        )
+        if not trend_df.empty
+        else set()
+    )
+    contract_row_count = len(contract_df.index)
 
     if not trend_symbols:
         raise RuntimeError("Exact target-date Trend History has no symbols.")
@@ -359,12 +323,7 @@ def verify_inputs(engine, run_date: date, history_days: int = 5) -> dict:
     if int(contract_row_count) != len(contract_symbols):
         raise RuntimeError("Contract snapshot contains duplicate target-date symbol rows.")
 
-    strategy_inputs = TrendIdentifierDbAdapter(
-        engine=engine,
-        run_date=run_date,
-        history_days=history_days,
-        require_exact_contract_snapshot=True,
-    ).build_all()
+    strategy_inputs = adapter.build_all()
     if not strategy_inputs:
         raise RuntimeError("No exact-date Strategy inputs were produced.")
     validate_strategy_input_coverage(
@@ -385,6 +344,7 @@ def verify_inputs(engine, run_date: date, history_days: int = 5) -> dict:
 
     return {
         "run_date": run_date.isoformat(),
+        "user_id": user_id,
         "trend_dates": trend_date_patterns[0]["dates"],
         "trend_date_patterns": trend_date_patterns,
         "trend_symbol_count": len(trend_symbols),
@@ -420,7 +380,7 @@ def verify_inputs(engine, run_date: date, history_days: int = 5) -> dict:
 def main() -> None:
     args = build_argument_parser().parse_args()
     run_date = date.fromisoformat(args.run_date)
-    payload = verify_inputs(get_engine(), run_date, args.history_days)
+    payload = verify_inputs(get_engine(), run_date, args.user_id, args.history_days)
     print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
 
 

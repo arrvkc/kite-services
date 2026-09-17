@@ -560,6 +560,7 @@ class HistoricalBackfillContractTests(unittest.TestCase):
         adapter = CapturingDbAdapter(
             engine=object(),
             run_date=date(2026, 8, 20),
+            user_id="XJ1877",
             require_exact_contract_snapshot=True,
         )
         inputs = adapter.build_all()
@@ -568,6 +569,8 @@ class HistoricalBackfillContractTests(unittest.TestCase):
         self.assertIn("ROW_NUMBER() OVER", adapter.sql[0])
         self.assertIn("PARTITION BY history.symbol", adapter.sql[0])
         self.assertIn("trade_date = :run_date", adapter.sql[0])
+        self.assertIn("history.user_id = :user_id", adapter.sql[0])
+        self.assertIn("user_id = :user_id", adapter.sql[1])
         self.assertIn("selection_date = :run_date", adapter.sql[1])
         self.assertNotIn("selection_date <= :run_date", adapter.sql[1])
 
@@ -575,6 +578,7 @@ class HistoricalBackfillContractTests(unittest.TestCase):
         adapter = CapturingDbAdapter(
             engine=object(),
             run_date=date(2026, 8, 20),
+            user_id="OMK569",
         )
         adapter.build_all()
         self.assertIn("SELECT DISTINCT trade_date", adapter.sql[0])
@@ -694,6 +698,14 @@ class HistoricalBackfillContractTests(unittest.TestCase):
             for day in (13, 14, 17, 18, 19)
         ]
         with self.assertRaisesRegex(RuntimeError, "non-target sessions"):
+            build_trend_date_patterns(rows, date(2026, 8, 20), 5)
+
+    def test_per_symbol_session_patterns_reject_duplicate_account_session(self):
+        rows = [
+            ("ABC", date(2026, 8, day))
+            for day in (14, 17, 18, 20, 20)
+        ]
+        with self.assertRaisesRegex(RuntimeError, "duplicate"):
             build_trend_date_patterns(rows, date(2026, 8, 20), 5)
 
     def test_declared_null_score_exclusions_reconcile_strategy_input_count(self):

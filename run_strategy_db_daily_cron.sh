@@ -92,6 +92,7 @@ echo "==================================================" >> "$MASTER_LOG"
   PYTHONPATH=.:services "$PYTHON_BIN" \
     engines/strategy_deterministic_engine/scripts/verify_strategy_backfill_inputs.py \
     --run-date "$RUN_DATE" \
+    --user-id "$USER_ID" \
     --history-days 5
 
   echo "--------------------------------------------------"

@@ -159,11 +159,17 @@ def main() -> None:
 
     input_verification = None
     if args.require_exact_contract_snapshot:
-        input_verification = verify_inputs(engine, run_date, args.history_days)
+        input_verification = verify_inputs(
+            engine,
+            run_date,
+            args.user_id,
+            args.history_days,
+        )
 
     adapter = TrendIdentifierDbAdapter(
         engine=engine,
         run_date=run_date,
+        user_id=args.user_id,
         history_days=args.history_days,
         require_exact_contract_snapshot=args.require_exact_contract_snapshot,
     )

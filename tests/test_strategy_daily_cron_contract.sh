@@ -67,7 +67,7 @@ run_pipeline >/dev/null
 grep -Fq 'validate_strategy_kite_credentials.py XJ1877' "$ROOT/calls"
 grep -Fq 'sync_trend_history_fo_universe_to_db.py XJ1877 --history-days 5 --end-date 2026-08-31 --strict' "$ROOT/calls"
 grep -Fq 'sync_contract_snapshot_fo_universe_to_db.py XJ1877 --selection-date 2026-08-31 --strict' "$ROOT/calls"
-grep -Fq 'verify_strategy_backfill_inputs.py --run-date 2026-08-31 --history-days 5' "$ROOT/calls"
+grep -Fq 'verify_strategy_backfill_inputs.py --run-date 2026-08-31 --user-id XJ1877 --history-days 5' "$ROOT/calls"
 grep -Fq 'run_strategy_engine_batch_from_db.py XJ1877 --run-date 2026-08-31 --history-days 5 --require-exact-contract-snapshot' "$ROOT/calls"
 if grep -Fq 'email_strategy_report.py' "$PIPELINE"; then
     fail "daily Kite pipeline still owns success email"
