@@ -8,7 +8,7 @@ PYTHON_BIN="${EAJEE_KITE_PYTHON:-$APP_DIR/venv/bin/python}"
 RUN_DATE="${EAJEE_STRATEGY_RUN_DATE:-$(date '+%Y-%m-%d')}"
 RUN_TS="$(date '+%Y-%m-%d_%H-%M-%S')"
 
-USER_ID="OMK569"
+USER_ID="XJ1877"
 
 mkdir -p "$LOG_DIR"
 

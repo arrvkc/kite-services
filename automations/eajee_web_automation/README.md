@@ -77,7 +77,6 @@ Current production users:
 
 - XJ1877
 - SQW865
-- OMK569
 - DKJ644
 
 New users must be individually verified before addition.
