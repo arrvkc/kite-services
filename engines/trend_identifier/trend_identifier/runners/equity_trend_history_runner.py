@@ -301,24 +301,29 @@ class EquityTrendHistoryRunner:
                     f"on {target_date}: expected one target-session daily candle."
                 )
 
+            latest_target_hour = None
+            if not target_hourly.empty:
+                latest_target_hour = (
+                    target_hourly["timestamp"]
+                    .dt.tz_convert("Asia/Kolkata")
+                    .max()
+                )
+            if (
+                latest_target_hour is None
+                or latest_target_hour.time() < time(15, 15)
+            ):
+                raise TargetSessionNotFinalized(
+                    f"{symbol.upper()} target session {target_date} has no "
+                    "completed intraday evidence."
+                )
+
             retrieved_local = retrieved_at.astimezone(ZoneInfo("Asia/Kolkata"))
             if retrieved_local.date() == target_date:
-                latest_target_hour = None
-                if not target_hourly.empty:
-                    latest_target_hour = (
-                        target_hourly["timestamp"]
-                        .dt.tz_convert("Asia/Kolkata")
-                        .max()
-                    )
-                if (
-                    retrieved_local.time() < time(16, 0)
-                    or latest_target_hour is None
-                    or latest_target_hour.time() < time(15, 15)
-                ):
-                    raise TargetSessionNotFinalized(
-                        f"{symbol.upper()} target session {target_date} is not finalized."
-                    )
-            elif retrieved_local.date() < target_date:
+                raise TargetSessionNotFinalized(
+                    f"{symbol.upper()} target session {target_date} is not finalized; "
+                    "same-day historical evidence may still be revised."
+                )
+            if retrieved_local.date() < target_date:
                 raise TargetSessionNotFinalized(
                     f"{symbol.upper()} target session {target_date} is in the future."
                 )

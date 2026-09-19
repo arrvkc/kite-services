@@ -311,10 +311,18 @@ class HistoricalBackfillContractTests(unittest.TestCase):
                     2026, 5, 22, 9, 59, tzinfo=timezone.utc
                 ),
             )
+        with self.assertRaisesRegex(
+            TargetSessionNotFinalized, "same-day historical evidence"
+        ):
+            self._coherent_history_result(
+                "ABC",
+                [100.0, 101.0, 102.0, 103.0, 104.0],
+                retrieved_at=datetime(2026, 5, 22, 10, 31, tzinfo=timezone.utc),
+            )
         result, _ = self._coherent_history_result(
             "ABC",
             [100.0, 101.0, 102.0, 103.0, 104.0],
-            retrieved_at=datetime(2026, 5, 22, 10, 31, tzinfo=timezone.utc),
+            retrieved_at=datetime(2026, 5, 23, 3, 30, tzinfo=timezone.utc),
         )
         self.assertEqual(result.source_window.finality_status, "FINALIZED")
 
@@ -547,7 +555,9 @@ class HistoricalBackfillContractTests(unittest.TestCase):
                 "instrument_token": 99,
             },
         )
-        with self.assertRaisesRegex(RuntimeError, "No completed market session"):
+        with self.assertRaisesRegex(
+            TargetSessionNotFinalized, "no completed intraday evidence"
+        ):
             runner.build_history_for_symbol(
                 "NEW", history_days=1, end_date=date(2026, 8, 27)
             )
