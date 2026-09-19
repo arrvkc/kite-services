@@ -9,6 +9,17 @@ RUN_DATE="${EAJEE_STRATEGY_RUN_DATE:-$(date '+%Y-%m-%d')}"
 RUN_TS="$(date '+%Y-%m-%d_%H-%M-%S')"
 
 USER_ID="XJ1877"
+FINALITY_RETRY_ATTEMPTS="${EAJEE_STRATEGY_FINALITY_RETRY_ATTEMPTS:-3}"
+FINALITY_RETRY_SECONDS="${EAJEE_STRATEGY_FINALITY_RETRY_SECONDS:-300}"
+
+if [[ ! "$FINALITY_RETRY_ATTEMPTS" =~ ^[1-5]$ ]]; then
+  echo "Invalid EAJEE_STRATEGY_FINALITY_RETRY_ATTEMPTS" >&2
+  exit 64
+fi
+if [[ ! "$FINALITY_RETRY_SECONDS" =~ ^[0-9]+$ ]] || (( FINALITY_RETRY_SECONDS > 900 )); then
+  echo "Invalid EAJEE_STRATEGY_FINALITY_RETRY_SECONDS" >&2
+  exit 64
+fi
 
 mkdir -p "$LOG_DIR"
 
@@ -48,12 +59,27 @@ echo "==================================================" >> "$MASTER_LOG"
   echo "START: $(date '+%Y-%m-%d %H:%M:%S')"
   echo "--------------------------------------------------"
 
-  PYTHONPATH=.:services "$PYTHON_BIN" \
-    engines/strategy_deterministic_engine/scripts/sync_trend_history_fo_universe_to_db.py \
-    "$USER_ID" \
-    --history-days 5 \
-    --end-date "$RUN_DATE" \
-    --strict
+  attempt=1
+  while true; do
+    set +e
+    PYTHONPATH=.:services "$PYTHON_BIN" \
+      engines/strategy_deterministic_engine/scripts/sync_trend_history_fo_universe_to_db.py \
+      "$USER_ID" \
+      --history-days 5 \
+      --end-date "$RUN_DATE" \
+      --strict
+    trend_rc=$?
+    set -e
+    if (( trend_rc == 0 )); then
+      break
+    fi
+    if (( trend_rc != 75 || attempt >= FINALITY_RETRY_ATTEMPTS )); then
+      exit "$trend_rc"
+    fi
+    echo "FINALITY_RETRY pending attempt=$attempt/$FINALITY_RETRY_ATTEMPTS"
+    sleep "$FINALITY_RETRY_SECONDS"
+    attempt=$((attempt + 1))
+  done
 
   echo "--------------------------------------------------"
   echo "STEP 1 COMPLETE"

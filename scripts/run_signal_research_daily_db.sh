@@ -135,10 +135,10 @@ WITH raw AS (
      AND snapshot.symbol = e.symbol
      AND snapshot.interval = 'day'
     JOIN historical_price_bars basis
-      ON basis.snapshot_id = snapshot.id
+      ON basis.dataset_id = snapshot.dataset_id
      AND basis.session_date = e.entry_date
     JOIN historical_price_bars observed
-      ON observed.snapshot_id = snapshot.id
+      ON observed.dataset_id = snapshot.dataset_id
      AND observed.session_date > e.entry_date
      AND observed.session_date <= e.expiry_date
     WHERE NULLIF(:'recovery_run_date', '') IS NULL

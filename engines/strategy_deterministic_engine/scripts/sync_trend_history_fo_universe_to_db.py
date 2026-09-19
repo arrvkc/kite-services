@@ -5,6 +5,7 @@ import hashlib
 import json
 import math
 from datetime import date
+from types import SimpleNamespace
 from typing import Any
 import uuid
 
@@ -13,6 +14,7 @@ from kiteconnect import KiteConnect
 from kiteconnect.exceptions import TokenException
 
 from services.kite_credentials_service import get_kite_credentials
+from services.nse_final_close import NseFinalCloseProvider, NseFinalCloseUnavailable
 from engines.strategy_deterministic_engine.adapters.trend_identifier_adapter import (
     TrendIdentifierKiteAdapter,
 )
@@ -20,11 +22,13 @@ from engines.trend_identifier.trend_identifier.runners.equity_trend_history_runn
     EquityTrendHistoryRunner,
     NoTradingActivityCandidate,
     TargetDateHistoryUnavailableCandidate,
+    TargetSessionNotFinalized,
     canonical_bars,
 )
 from engines.strategy_deterministic_engine.db.postgres import get_engine
 from engines.strategy_deterministic_engine.db.upserts import (
     persist_strict_trend_preparation,
+    persist_pending_historical_acquisition,
     upsert_trend_history_rows,
 )
 
@@ -221,9 +225,25 @@ def build_symbol_rows(args, result) -> list[dict]:
     return symbol_rows
 
 
-def build_acquisition_evidence(acquisition_id: str, args, result) -> dict:
-    """Serialize the exact coherent windows and derived Trend rows for storage."""
+def dataset_identity_hash(*, result, interval: str, content_hash: str) -> str:
+    payload = {
+        "source": "ZERODHA_HISTORICAL_DATA",
+        "symbol": result.symbol,
+        "exchange": result.exchange,
+        "tradingsymbol": result.tradingsymbol,
+        "instrument_token": int(result.instrument_token),
+        "interval": interval,
+        "content_hash": content_hash,
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def build_window_evidence(acquisition_id: str, args, result) -> dict:
+    """Serialize one coherent source window without publishing analytics."""
     window = result.source_window
+    datasets = []
     snapshots = []
     bars = []
     daily_snapshot_id = None
@@ -237,10 +257,31 @@ def build_acquisition_evidence(acquisition_id: str, args, result) -> dict:
         canonical = canonical_bars(frame)
         if not canonical:
             raise RuntimeError(f"{result.symbol} {interval} acquisition is empty.")
+        dataset_id = dataset_identity_hash(
+            result=result,
+            interval=interval,
+            content_hash=content_hash,
+        )
+        datasets.append(
+            {
+                "id": dataset_id,
+                "source": "ZERODHA_HISTORICAL_DATA",
+                "symbol": result.symbol,
+                "exchange": result.exchange,
+                "tradingsymbol": result.tradingsymbol,
+                "instrument_token": result.instrument_token,
+                "interval": interval,
+                "covered_from": pd.Timestamp(frame["timestamp"].min()).to_pydatetime(),
+                "covered_to": pd.Timestamp(frame["timestamp"].max()).to_pydatetime(),
+                "bar_count": len(canonical),
+                "content_hash": content_hash,
+            }
+        )
         snapshots.append(
             {
                 "id": snapshot_id,
                 "acquisition_id": acquisition_id,
+                "dataset_id": dataset_id,
                 "source_account": args.user_id,
                 "symbol": result.symbol,
                 "exchange": result.exchange,
@@ -254,13 +295,28 @@ def build_acquisition_evidence(acquisition_id: str, args, result) -> dict:
                 "bar_count": len(canonical),
                 "content_hash": content_hash,
                 "validation_status": window.finality_status,
+                "finality_source": (
+                    window.finality_source if interval == "day" else None
+                ),
+                "finality_source_key": (
+                    window.finality_source_key if interval == "day" else None
+                ),
+                "finality_source_hash": (
+                    window.finality_source_hash if interval == "day" else None
+                ),
+                "finality_close": (
+                    window.finality_close if interval == "day" else None
+                ),
+                "finality_retrieved_at": (
+                    window.finality_retrieved_at if interval == "day" else None
+                ),
             }
         )
         for item in canonical:
             observed_at = pd.Timestamp(item["timestamp"])
             bars.append(
                 {
-                    "snapshot_id": snapshot_id,
+                    "dataset_id": dataset_id,
                     "observed_at": observed_at.to_pydatetime(),
                     "session_date": observed_at.tz_convert("Asia/Kolkata").date(),
                     "open": item["open"],
@@ -273,18 +329,30 @@ def build_acquisition_evidence(acquisition_id: str, args, result) -> dict:
             )
     if daily_snapshot_id is None:
         raise RuntimeError("A daily historical snapshot is required.")
+    return {
+        "datasets": datasets,
+        "snapshots": snapshots,
+        "bars": bars,
+        "daily_snapshot_id": daily_snapshot_id,
+    }
+
+
+def build_acquisition_evidence(acquisition_id: str, args, result) -> dict:
+    """Serialize the coherent source window and its derived Trend rows."""
+    evidence = build_window_evidence(acquisition_id, args, result)
     trend_outputs = []
     for row in build_symbol_rows(args, result):
         trend_outputs.append(
             {
                 **row,
                 "acquisition_id": acquisition_id,
-                "daily_snapshot_id": daily_snapshot_id,
+                "daily_snapshot_id": evidence["daily_snapshot_id"],
             }
         )
     return {
-        "snapshots": snapshots,
-        "bars": bars,
+        "datasets": evidence["datasets"],
+        "snapshots": evidence["snapshots"],
+        "bars": evidence["bars"],
         "trend_outputs": trend_outputs,
     }
 
@@ -294,6 +362,7 @@ def acquisition_content_hash(snapshots: list[dict]) -> str:
         {
             "symbol": item["symbol"],
             "interval": item["interval"],
+            "dataset_id": item["dataset_id"],
             "content_hash": item["content_hash"],
         }
         for item in sorted(
@@ -321,6 +390,17 @@ def main() -> None:
     )
 
     history_runner = EquityTrendHistoryRunner(kite=kite, exchange="NSE")
+    final_close_resolver = None
+    if end_date is not None:
+        try:
+            final_close_resolver = NseFinalCloseProvider().fetch(end_date).resolve
+        except NseFinalCloseUnavailable as exc:
+            unavailable_message = str(exc)
+
+            def unavailable_final_close(_instrument, _target_date):
+                raise NseFinalCloseUnavailable(unavailable_message)
+
+            final_close_resolver = unavailable_final_close
 
     engine = None if args.dry_run else get_engine()
     total_rows = 0
@@ -331,6 +411,7 @@ def main() -> None:
     strict_rows: list[dict] = []
     prepared_symbols: set[str] = set()
     acquisition_id = str(uuid.uuid4())
+    acquisition_datasets: list[dict] = []
     acquisition_snapshots: list[dict] = []
     acquisition_bars: list[dict] = []
     immutable_trend_outputs: list[dict] = []
@@ -341,6 +422,7 @@ def main() -> None:
                 symbol=symbol,
                 history_days=args.history_days,
                 end_date=end_date,
+                final_close_resolver=final_close_resolver,
             )
 
             symbol_rows = build_symbol_rows(args, result)
@@ -348,6 +430,7 @@ def main() -> None:
 
             if args.strict and not args.dry_run:
                 evidence = build_acquisition_evidence(acquisition_id, args, result)
+                acquisition_datasets.extend(evidence["datasets"])
                 acquisition_snapshots.extend(evidence["snapshots"])
                 acquisition_bars.extend(evidence["bars"])
                 immutable_trend_outputs.extend(evidence["trend_outputs"])
@@ -374,6 +457,34 @@ def main() -> None:
                 total_rows += written
                 print(f"[{index}/{len(symbols)}] OK {symbol} committed_rows={written}", flush=True)
 
+        except TargetSessionNotFinalized as exc:
+            exception_type, message = exception_detail(exc)
+            failures.append(
+                {
+                    "symbol": symbol,
+                    "type": exception_type,
+                    "message": message,
+                }
+            )
+            if args.strict and not args.dry_run and exc.source_window is not None:
+                pending_result = SimpleNamespace(
+                    symbol=exc.source_window.symbol,
+                    exchange=exc.source_window.exchange,
+                    tradingsymbol=exc.source_window.tradingsymbol,
+                    instrument_token=exc.source_window.instrument_token,
+                    source_window=exc.source_window,
+                )
+                evidence = build_window_evidence(
+                    acquisition_id, args, pending_result
+                )
+                acquisition_datasets.extend(evidence["datasets"])
+                acquisition_snapshots.extend(evidence["snapshots"])
+                acquisition_bars.extend(evidence["bars"])
+            print(
+                f"[{index}/{len(symbols)}] PENDING {symbol}: "
+                f"{exception_type}: {message}",
+                flush=True,
+            )
         except NoTradingActivityCandidate as exc:
             if args.strict and end_date is not None:
                 exclusion_candidates.append(exc)
@@ -440,6 +551,40 @@ def main() -> None:
                 f"{failure['message']}"
             )
         if args.strict:
+            retryable_finality = all(
+                failure["type"] == "TargetSessionNotFinalized"
+                for failure in failures
+            )
+            if (
+                retryable_finality
+                and not args.dry_run
+                and acquisition_snapshots
+            ):
+                persist_pending_historical_acquisition(
+                    engine,
+                    acquisition={
+                        "id": acquisition_id,
+                        "source_account": args.user_id,
+                        "target_session_date": end_date,
+                        "retrieved_at": max(
+                            item["retrieved_at"] for item in acquisition_snapshots
+                        ),
+                        "status": "PENDING",
+                        "finality_status": "PENDING_FINALITY",
+                        "content_hash": acquisition_content_hash(
+                            acquisition_snapshots
+                        ),
+                        "datasets": acquisition_datasets,
+                        "snapshots": acquisition_snapshots,
+                        "bars": acquisition_bars,
+                    },
+                    batch_size=args.batch_size,
+                )
+                print(
+                    "FINALITY_PENDING acquisition_id=" + acquisition_id,
+                    flush=True,
+                )
+                raise SystemExit(75)
             raise SystemExit(1)
 
     manifest = None
@@ -492,6 +637,7 @@ def main() -> None:
                     "content_hash": acquisition_content_hash(
                         acquisition_snapshots
                     ),
+                    "datasets": acquisition_datasets,
                     "snapshots": acquisition_snapshots,
                     "bars": acquisition_bars,
                     "trend_outputs": immutable_trend_outputs,

@@ -47,6 +47,9 @@ def test_signal_research_db_supports_exact_date_without_changing_cron_default(tm
     assert "JOIN historical_price_snapshots snapshot" in sql
     assert "JOIN historical_price_bars basis" in sql
     assert "JOIN historical_price_bars observed" in sql
+    assert "basis.dataset_id = snapshot.dataset_id" in sql
+    assert "observed.dataset_id = snapshot.dataset_id" in sql
+    assert "basis.snapshot_id" not in sql
     assert "FROM trend_history_fo_universe" not in sql
 
     default = subprocess.run(

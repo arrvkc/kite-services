@@ -59,27 +59,44 @@ VALUES (
 )
 """)
 
-HISTORICAL_SNAPSHOT_INSERT_SQL = text("""
-INSERT INTO historical_price_snapshots (
-    id, acquisition_id, source_account, symbol, exchange, tradingsymbol,
-    instrument_token, interval, target_session_date, covered_from, covered_to,
-    retrieved_at, bar_count, content_hash, validation_status
+HISTORICAL_DATASET_INSERT_SQL = text("""
+INSERT INTO historical_price_datasets (
+    id, source, symbol, exchange, tradingsymbol, instrument_token, interval,
+    covered_from, covered_to, bar_count, content_hash
 )
 VALUES (
-    :id, :acquisition_id, :source_account, :symbol, :exchange, :tradingsymbol,
+    :id, :source, :symbol, :exchange, :tradingsymbol, :instrument_token,
+    :interval, :covered_from, :covered_to, :bar_count, :content_hash
+)
+ON CONFLICT (id) DO NOTHING
+""")
+
+HISTORICAL_SNAPSHOT_INSERT_SQL = text("""
+INSERT INTO historical_price_snapshots (
+    id, acquisition_id, dataset_id, source_account, symbol, exchange, tradingsymbol,
+    instrument_token, interval, target_session_date, covered_from, covered_to,
+    retrieved_at, bar_count, content_hash, validation_status, finality_source,
+    finality_source_key, finality_source_hash, finality_close,
+    finality_retrieved_at
+)
+VALUES (
+    :id, :acquisition_id, :dataset_id, :source_account, :symbol, :exchange, :tradingsymbol,
     :instrument_token, :interval, :target_session_date, :covered_from, :covered_to,
-    :retrieved_at, :bar_count, :content_hash, :validation_status
+    :retrieved_at, :bar_count, :content_hash, :validation_status,
+    :finality_source, :finality_source_key, :finality_source_hash,
+    :finality_close, :finality_retrieved_at
 )
 """)
 
 HISTORICAL_BAR_INSERT_SQL = text("""
 INSERT INTO historical_price_bars (
-    snapshot_id, observed_at, session_date, open, high, low, close, volume, oi
+    dataset_id, observed_at, session_date, open, high, low, close, volume, oi
 )
 VALUES (
-    :snapshot_id, :observed_at, :session_date, :open, :high, :low, :close,
+    :dataset_id, :observed_at, :session_date, :open, :high, :low, :close,
     :volume, :oi
 )
+ON CONFLICT (dataset_id, observed_at) DO NOTHING
 """)
 
 HISTORICAL_TREND_OUTPUT_INSERT_SQL = text("""
@@ -202,6 +219,44 @@ RETURNING id
 """)
 
 
+def _persist_historical_evidence(conn, acquisition: dict, batch_size: int) -> None:
+    conn.execute(
+        HISTORICAL_ACQUISITION_INSERT_SQL,
+        {key: acquisition[key] for key in (
+            "id", "source_account", "target_session_date", "retrieved_at",
+            "status", "finality_status", "content_hash",
+        )},
+    )
+    for start in range(0, len(acquisition["datasets"]), batch_size):
+        conn.execute(
+            HISTORICAL_DATASET_INSERT_SQL,
+            acquisition["datasets"][start:start + batch_size],
+        )
+    for start in range(0, len(acquisition["snapshots"]), batch_size):
+        conn.execute(
+            HISTORICAL_SNAPSHOT_INSERT_SQL,
+            acquisition["snapshots"][start:start + batch_size],
+        )
+    for start in range(0, len(acquisition["bars"]), batch_size):
+        conn.execute(
+            HISTORICAL_BAR_INSERT_SQL,
+            acquisition["bars"][start:start + batch_size],
+        )
+
+
+def persist_pending_historical_acquisition(
+    engine,
+    *,
+    acquisition: dict,
+    batch_size: int = 500,
+) -> None:
+    """Retain retryable source evidence without linking or publishing a run."""
+    if acquisition["status"] != "PENDING":
+        raise ValueError("Pending historical evidence must have PENDING status.")
+    with engine.begin() as conn:
+        _persist_historical_evidence(conn, acquisition, batch_size)
+
+
 def persist_strict_trend_preparation(
     engine,
     rows: list[dict],
@@ -217,23 +272,7 @@ def persist_strict_trend_preparation(
 ) -> int:
     """Atomically persist exact-date rows and their requested-universe audit."""
     with engine.begin() as conn:
-        conn.execute(
-            HISTORICAL_ACQUISITION_INSERT_SQL,
-            {key: acquisition[key] for key in (
-                "id", "source_account", "target_session_date", "retrieved_at",
-                "status", "finality_status", "content_hash",
-            )},
-        )
-        for start in range(0, len(acquisition["snapshots"]), batch_size):
-            conn.execute(
-                HISTORICAL_SNAPSHOT_INSERT_SQL,
-                acquisition["snapshots"][start:start + batch_size],
-            )
-        for start in range(0, len(acquisition["bars"]), batch_size):
-            conn.execute(
-                HISTORICAL_BAR_INSERT_SQL,
-                acquisition["bars"][start:start + batch_size],
-            )
+        _persist_historical_evidence(conn, acquisition, batch_size)
         for start in range(0, len(acquisition["trend_outputs"]), batch_size):
             conn.execute(
                 HISTORICAL_TREND_OUTPUT_INSERT_SQL,

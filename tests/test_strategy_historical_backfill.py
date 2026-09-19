@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date, datetime, timezone
+from decimal import Decimal
 from contextlib import redirect_stdout
 import io
 from types import SimpleNamespace
@@ -11,6 +13,9 @@ import sys
 
 import pandas as pd
 from kiteconnect.exceptions import TokenException
+from sqlalchemy import create_engine, text
+
+from services.nse_final_close import OfficialFinalCloseEvidence
 
 from engines.strategy_deterministic_engine.adapters.trend_identifier_adapter import (
     TrendIdentifierKiteAdapter,
@@ -21,6 +26,7 @@ from engines.strategy_deterministic_engine.adapters.trend_identifier_db_adapter 
 from engines.strategy_deterministic_engine.db.upserts import (
     DELETE_STRATEGY_BATCH_RESULTS_FOR_DATE_SQL,
     PREPARE_STRATEGY_RUN_SQL,
+    persist_pending_historical_acquisition,
     persist_strict_trend_preparation,
 )
 from engines.strategy_deterministic_engine.scripts import (
@@ -96,6 +102,25 @@ def contract_frame() -> pd.DataFrame:
     )
 
 
+def official_close(
+    symbol: str, target_date: date, close: object
+) -> OfficialFinalCloseEvidence:
+    return OfficialFinalCloseEvidence(
+        session_date=target_date,
+        exchange="NSE",
+        tradingsymbol=symbol,
+        instrument_kind="NSE_CM_EQ_FINAL",
+        close=Decimal(str(close)),
+        source_name=(
+            "BhavCopy_NSE_CM_0_0_0_"
+            + target_date.strftime("%Y%m%d")
+            + "_F_0000.csv.zip"
+        ),
+        source_sha256="f" * 64,
+        retrieved_at=datetime(2026, 5, 22, 11, tzinfo=timezone.utc),
+    )
+
+
 def coherent_source_window(
     symbol: str = "ABC", target_date: date = date(2026, 9, 8)
 ) -> CoherentHistoricalWindow:
@@ -167,6 +192,7 @@ def acquisition_fixture(acquisition_id: str = "acquisition-1") -> dict:
         "finality_status": "FINALIZED",
         "content_hash": "a" * 64,
         "snapshots": [],
+        "datasets": [],
         "bars": [],
         "trend_outputs": [],
     }
@@ -191,7 +217,9 @@ class CapturingDbAdapter(TrendIdentifierDbAdapter):
 
 
 class HistoricalBackfillContractTests(unittest.TestCase):
-    def _coherent_history_result(self, symbol, closes, *, retrieved_at=None):
+    def _coherent_history_result(
+        self, symbol, closes, *, retrieved_at=None, official_value=None
+    ):
         runner = EquityTrendHistoryRunner.__new__(EquityTrendHistoryRunner)
         runner.exchange = "NSE"
         equity = MagicMock()
@@ -227,6 +255,7 @@ class HistoricalBackfillContractTests(unittest.TestCase):
                 "resolved_exchange": "NSE",
                 "resolved_tradingsymbol": symbol,
                 "instrument_token": 123,
+                "kite_instrument_type": "EQ",
             },
         )
         equity.evaluate_raw_bars_asof.return_value = {
@@ -247,6 +276,11 @@ class HistoricalBackfillContractTests(unittest.TestCase):
             end_date=dates[-1].date(),
             retrieved_at=retrieved_at
             or datetime(2026, 6, 30, tzinfo=timezone.utc),
+            final_close_resolver=lambda _instrument, target_date: official_close(
+                symbol,
+                target_date,
+                closes[-1] if official_value is None else official_value,
+            ),
         )
         return result, equity
 
@@ -300,31 +334,189 @@ class HistoricalBackfillContractTests(unittest.TestCase):
             item["acquisition_id"] == "acquisition-2"
             for item in revised_evidence["snapshots"]
         ))
+        self.assertNotEqual(
+            first_evidence["datasets"][0]["id"],
+            revised_evidence["datasets"][0]["id"],
+        )
 
-    def test_same_day_target_requires_completed_session_evidence(self):
-        target = date(2026, 5, 22)
-        with self.assertRaisesRegex(TargetSessionNotFinalized, "not finalized"):
-            self._coherent_history_result(
-                "ABC",
-                [100.0, 101.0, 102.0, 103.0, 104.0],
-                retrieved_at=datetime(
-                    2026, 5, 22, 9, 59, tzinfo=timezone.utc
-                ),
+    def test_identical_content_reuses_dataset_with_distinct_acquisitions(self):
+        result, _ = self._coherent_history_result(
+            "NORMAL", [100.0, 101.0, 102.0]
+        )
+        first = build_acquisition_evidence(
+            "acquisition-1", SimpleNamespace(user_id="XJ1877"), result
+        )
+        second = build_acquisition_evidence(
+            "acquisition-2", SimpleNamespace(user_id="XJ1877"), result
+        )
+        self.assertNotEqual(first["snapshots"][0]["id"], second["snapshots"][0]["id"])
+        self.assertEqual(first["datasets"][0]["id"], second["datasets"][0]["id"])
+        self.assertEqual(first["bars"][0]["dataset_id"], second["bars"][0]["dataset_id"])
+        self.assertNotIn("snapshot_id", first["bars"][0])
+
+    def test_dataset_identity_cannot_cross_symbol_or_interval(self):
+        result, _ = self._coherent_history_result(
+            "NORMAL", [100.0, 101.0, 102.0]
+        )
+        normal = build_acquisition_evidence(
+            "acquisition-1", SimpleNamespace(user_id="XJ1877"), result
+        )
+        other_symbol = replace(result, symbol="OTHER", tradingsymbol="OTHER")
+        other = build_acquisition_evidence(
+            "acquisition-2", SimpleNamespace(user_id="XJ1877"), other_symbol
+        )
+        self.assertNotEqual(normal["datasets"][0]["id"], other["datasets"][0]["id"])
+        self.assertNotEqual(normal["datasets"][0]["id"], normal["datasets"][1]["id"])
+
+    def test_identical_content_is_physically_stored_once_for_two_acquisitions(self):
+        engine = create_engine("sqlite://")
+        with engine.begin() as connection:
+            connection.execute(text("""
+                CREATE TABLE historical_price_acquisitions (
+                    id VARCHAR(36) PRIMARY KEY, source_account VARCHAR NOT NULL,
+                    target_session_date DATE NOT NULL, retrieved_at TIMESTAMP NOT NULL,
+                    source VARCHAR NOT NULL DEFAULT 'ZERODHA_HISTORICAL_DATA',
+                    status VARCHAR NOT NULL, finality_status VARCHAR NOT NULL,
+                    content_hash VARCHAR NOT NULL
+                )
+            """))
+            connection.execute(text("""
+                CREATE TABLE historical_price_datasets (
+                    id VARCHAR(64) PRIMARY KEY, source VARCHAR NOT NULL,
+                    symbol VARCHAR NOT NULL, exchange VARCHAR NOT NULL,
+                    tradingsymbol VARCHAR NOT NULL, instrument_token BIGINT NOT NULL,
+                    interval VARCHAR NOT NULL, covered_from TIMESTAMP NOT NULL,
+                    covered_to TIMESTAMP NOT NULL, bar_count INTEGER NOT NULL,
+                    content_hash VARCHAR NOT NULL
+                )
+            """))
+            connection.execute(text("""
+                CREATE TABLE historical_price_snapshots (
+                    id VARCHAR(36) PRIMARY KEY, acquisition_id VARCHAR(36) NOT NULL,
+                    dataset_id VARCHAR(64) NOT NULL, source_account VARCHAR NOT NULL,
+                    symbol VARCHAR NOT NULL, exchange VARCHAR NOT NULL,
+                    tradingsymbol VARCHAR NOT NULL, instrument_token BIGINT NOT NULL,
+                    interval VARCHAR NOT NULL, target_session_date DATE NOT NULL,
+                    covered_from TIMESTAMP NOT NULL, covered_to TIMESTAMP NOT NULL,
+                    retrieved_at TIMESTAMP NOT NULL, bar_count INTEGER NOT NULL,
+                    content_hash VARCHAR NOT NULL, validation_status VARCHAR NOT NULL,
+                    finality_source VARCHAR, finality_source_key VARCHAR,
+                    finality_source_hash VARCHAR, finality_close NUMERIC,
+                    finality_retrieved_at TIMESTAMP
+                )
+            """))
+            connection.execute(text("""
+                CREATE TABLE historical_price_bars (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, dataset_id VARCHAR(64) NOT NULL,
+                    observed_at TIMESTAMP NOT NULL, session_date DATE NOT NULL,
+                    open NUMERIC NOT NULL, high NUMERIC NOT NULL, low NUMERIC NOT NULL,
+                    close NUMERIC NOT NULL, volume NUMERIC NOT NULL, oi NUMERIC,
+                    UNIQUE(dataset_id, observed_at)
+                )
+            """))
+
+        result, _ = self._coherent_history_result(
+            "NORMAL", [100.0, 101.0, 102.0]
+        )
+        for acquisition_id in ("acquisition-1", "acquisition-2"):
+            evidence = build_acquisition_evidence(
+                acquisition_id, SimpleNamespace(user_id="XJ1877"), result
             )
-        with self.assertRaisesRegex(
-            TargetSessionNotFinalized, "same-day historical evidence"
-        ):
-            self._coherent_history_result(
-                "ABC",
-                [100.0, 101.0, 102.0, 103.0, 104.0],
-                retrieved_at=datetime(2026, 5, 22, 10, 31, tzinfo=timezone.utc),
+            for snapshot in evidence["snapshots"]:
+                if snapshot["finality_close"] is not None:
+                    snapshot["finality_close"] = str(snapshot["finality_close"])
+            persist_pending_historical_acquisition(
+                engine,
+                acquisition={
+                    "id": acquisition_id,
+                    "source_account": "XJ1877",
+                    "target_session_date": result.source_window.target_session_date,
+                    "retrieved_at": result.source_window.retrieved_at,
+                    "status": "PENDING",
+                    "finality_status": "PENDING_FINALITY",
+                    "content_hash": acquisition_content_hash(evidence["snapshots"]),
+                    "datasets": evidence["datasets"],
+                    "snapshots": evidence["snapshots"],
+                    "bars": evidence["bars"],
+                },
             )
+
+        with engine.connect() as connection:
+            self.assertEqual(
+                connection.execute(
+                    text("SELECT count(*) FROM historical_price_acquisitions")
+                ).scalar_one(),
+                2,
+            )
+            self.assertEqual(
+                connection.execute(
+                    text("SELECT count(*) FROM historical_price_datasets")
+                ).scalar_one(),
+                2,
+            )
+            self.assertEqual(
+                connection.execute(
+                    text("SELECT count(*) FROM historical_price_snapshots")
+                ).scalar_one(),
+                4,
+            )
+            self.assertEqual(
+                connection.execute(
+                    text("SELECT count(*) FROM historical_price_bars")
+                ).scalar_one(),
+                len(evidence["bars"]),
+            )
+
+    def test_same_day_target_is_final_only_when_official_nse_close_matches(self):
+        closes = [100.0, 101.0, 102.0, 103.0, 104.0]
         result, _ = self._coherent_history_result(
             "ABC",
-            [100.0, 101.0, 102.0, 103.0, 104.0],
-            retrieved_at=datetime(2026, 5, 23, 3, 30, tzinfo=timezone.utc),
+            closes,
+            retrieved_at=datetime(2026, 5, 22, 10, 31, tzinfo=timezone.utc),
         )
         self.assertEqual(result.source_window.finality_status, "FINALIZED")
+        self.assertEqual(result.source_window.finality_close, Decimal("104.0"))
+        self.assertEqual(result.source_window.finality_source, "NSE_CM_EQ_FINAL")
+        evidence = build_acquisition_evidence(
+            "same-day-final", SimpleNamespace(user_id="XJ1877"), result
+        )
+        daily_snapshot = next(
+            item for item in evidence["snapshots"] if item["interval"] == "day"
+        )
+        self.assertEqual(daily_snapshot["finality_source"], "NSE_CM_EQ_FINAL")
+        self.assertEqual(daily_snapshot["finality_close"], Decimal("104.0"))
+        self.assertEqual(daily_snapshot["finality_source_hash"], "f" * 64)
+
+        with self.assertRaisesRegex(
+            TargetSessionNotFinalized, "does not match official NSE final"
+        ) as mismatch:
+            self._coherent_history_result(
+                "ABC",
+                closes,
+                retrieved_at=datetime(2026, 5, 22, 10, 31, tzinfo=timezone.utc),
+                official_value=Decimal("104.05"),
+            )
+        self.assertEqual(
+            mismatch.exception.source_window.finality_status,
+            "PENDING_FINALITY",
+        )
+
+    def test_no_official_final_close_fails_even_on_later_calendar_date(self):
+        runner = EquityTrendHistoryRunner.__new__(EquityTrendHistoryRunner)
+        runner.exchange = "NSE"
+        result, equity = self._coherent_history_result(
+            "ABC", [100.0, 101.0, 102.0]
+        )
+        runner.equity_runner = equity
+        with self.assertRaisesRegex(
+            TargetSessionNotFinalized, "no official NSE final-close evidence"
+        ):
+            runner.build_history_for_symbol(
+                "ABC",
+                history_days=3,
+                end_date=result.source_window.target_session_date,
+                retrieved_at=datetime(2026, 6, 30, tzinfo=timezone.utc),
+            )
 
     def test_niftyfpi_missing_target_source_is_governed_exclusion_candidate(self):
         kite = MagicMock()
@@ -615,7 +807,7 @@ class HistoricalBackfillContractTests(unittest.TestCase):
             sys,
             "argv",
             ["sync", "OMK569", "--end-date", "2026-09-08", "--strict"],
-        ):
+        ), patch.object(trend_sync, "NseFinalCloseProvider"):
             trend_sync.main()
 
         persisted_rows = persist_preparation.call_args.args[1]
@@ -651,7 +843,7 @@ class HistoricalBackfillContractTests(unittest.TestCase):
             sys,
             "argv",
             ["sync", "OMK569", "--end-date", "2026-09-08", "--strict"],
-        ):
+        ), patch.object(trend_sync, "NseFinalCloseProvider"):
             with redirect_stdout(output), self.assertRaises(SystemExit) as raised:
                 trend_sync.main()
         self.assertEqual(raised.exception.code, 1)
@@ -659,6 +851,49 @@ class HistoricalBackfillContractTests(unittest.TestCase):
             "OTHER: RuntimeError: unexpected source failure", output.getvalue()
         )
         persist_preparation.assert_not_called()
+
+    @patch.object(trend_sync, "persist_pending_historical_acquisition")
+    @patch.object(trend_sync, "persist_strict_trend_preparation")
+    @patch.object(trend_sync, "get_engine", return_value=object())
+    @patch.object(trend_sync, "EquityTrendHistoryRunner")
+    @patch.object(trend_sync, "TrendIdentifierKiteAdapter")
+    @patch.object(trend_sync, "KiteConnect")
+    @patch.object(trend_sync, "get_kite_credentials", return_value=("key", "token"))
+    def test_unreconciled_final_close_persists_pending_evidence_without_publication(
+        self,
+        _credentials,
+        _kite,
+        adapter_cls,
+        runner_cls,
+        _engine,
+        persist_preparation,
+        persist_pending,
+    ):
+        adapter_cls.return_value.get_fo_universe_symbols.return_value = ["ABC"]
+        window = replace(
+            coherent_source_window(),
+            finality_status="PENDING_FINALITY",
+        )
+        runner_cls.return_value.build_history_for_symbol.side_effect = (
+            TargetSessionNotFinalized(
+                "ABC has not reconciled to NSE final.",
+                source_window=window,
+            )
+        )
+        with patch.object(
+            sys,
+            "argv",
+            ["sync", "XJ1877", "--end-date", "2026-09-08", "--strict"],
+        ), patch.object(trend_sync, "NseFinalCloseProvider"):
+            with self.assertRaises(SystemExit) as raised:
+                trend_sync.main()
+        self.assertEqual(raised.exception.code, 75)
+        persist_preparation.assert_not_called()
+        persisted = persist_pending.call_args.kwargs["acquisition"]
+        self.assertEqual(persisted["status"], "PENDING")
+        self.assertEqual(persisted["finality_status"], "PENDING_FINALITY")
+        self.assertEqual(len(persisted["datasets"]), 2)
+        self.assertEqual(len(persisted["snapshots"]), 2)
 
     @patch.object(trend_sync, "persist_strict_trend_preparation")
     @patch.object(trend_sync, "get_engine", return_value=object())
@@ -682,7 +917,7 @@ class HistoricalBackfillContractTests(unittest.TestCase):
             sys,
             "argv",
             ["sync", "OMK569", "--end-date", "2026-09-08", "--strict"],
-        ):
+        ), patch.object(trend_sync, "NseFinalCloseProvider"):
             with self.assertRaisesRegex(RuntimeError, "database unavailable"):
                 trend_sync.main()
 
@@ -721,6 +956,7 @@ class HistoricalBackfillContractTests(unittest.TestCase):
                 "resolved_exchange": "NSE",
                 "resolved_tradingsymbol": "ABC",
                 "instrument_token": 1,
+                "kite_instrument_type": "EQ",
             },
         )
         equity.evaluate_raw_bars_asof.return_value = {
@@ -737,7 +973,12 @@ class HistoricalBackfillContractTests(unittest.TestCase):
         }
 
         result = runner.build_history_for_symbol(
-            "ABC", history_days=2, end_date=date(2026, 8, 20)
+            "ABC",
+            history_days=2,
+            end_date=date(2026, 8, 20),
+            final_close_resolver=lambda _instrument, target_date: official_close(
+                "ABC", target_date, 101.0
+            ),
         )
 
         self.assertEqual(result.history["date"].tolist(), ["2026-08-19", "2026-08-20"])

@@ -73,3 +73,23 @@ if grep -Fq 'email_strategy_report.py' "$PIPELINE"; then
     fail "daily Kite pipeline still owns success email"
 fi
 echo "PASS daily pipeline uses exact-date fail-closed contract and does not email"
+
+prepare
+cat > "$ROOT/python" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$EAJEE_DAILY_TEST_CALLS"
+if [[ "$*" == *sync_trend_history* ]]; then
+  count="$(grep -c 'sync_trend_history' "$EAJEE_DAILY_TEST_CALLS")"
+  (( count < 3 )) && exit 75
+fi
+exit 0
+SH
+chmod 0755 "$ROOT/python"
+EAJEE_STRATEGY_FINALITY_RETRY_ATTEMPTS=3 \
+EAJEE_STRATEGY_FINALITY_RETRY_SECONDS=0 \
+  run_pipeline >/dev/null
+[[ "$(grep -c 'sync_trend_history' "$ROOT/calls")" = 3 ]] || \
+  fail "retryable finality did not run the bounded whole-acquisition retry"
+[[ "$(wc -l < "$ROOT/calls" | tr -d ' ')" = 7 ]] || \
+  fail "finality retry changed downstream stage sequencing"
+echo "PASS retryable finality is bounded and resumes the normal pipeline"

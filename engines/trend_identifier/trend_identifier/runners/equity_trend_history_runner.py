@@ -5,11 +5,18 @@ from datetime import date, datetime, time, timezone
 from decimal import Decimal, InvalidOperation
 import hashlib
 import json
-from typing import Any, Dict, List
+from typing import Any, Callable, Dict, List
 from zoneinfo import ZoneInfo
 
 import pandas as pd
 from kiteconnect import KiteConnect
+
+from services.nse_final_close import (
+    NseFinalCloseIdentityError,
+    NseFinalCloseUnavailable,
+    OfficialFinalCloseEvidence,
+    closes_match,
+)
 
 from .equity_trend_runner import EquityTrendRunner
 
@@ -46,10 +53,21 @@ class CoherentHistoricalWindow:
     hourly: pd.DataFrame
     daily_content_hash: str
     hourly_content_hash: str
+    finality_source: str | None = None
+    finality_source_key: str | None = None
+    finality_source_hash: str | None = None
+    finality_close: Decimal | None = None
+    finality_retrieved_at: datetime | None = None
 
 
 class TargetSessionNotFinalized(RuntimeError):
     """The target daily candle is not yet safe for immutable publication."""
+
+    def __init__(
+        self, message: str, *, source_window: CoherentHistoricalWindow | None = None
+    ) -> None:
+        self.source_window = source_window
+        super().__init__(message)
 
 
 def _canonical_decimal(value: object) -> str | None:
@@ -180,6 +198,10 @@ class EquityTrendHistoryRunner:
         end_date: date | str | None = None,
         *,
         retrieved_at: datetime | None = None,
+        final_close_resolver: Callable[
+            [dict[str, Any], date], OfficialFinalCloseEvidence
+        ]
+        | None = None,
     ) -> TrendHistoryResult:
         if history_days <= 0:
             raise ValueError("history_days must be positive.")
@@ -187,6 +209,7 @@ class EquityTrendHistoryRunner:
         # Acquire the complete daily/hourly source once.  Every historical cut
         # point below is a slice of this exact version, so a run cannot stitch
         # together different Zerodha historical revision bases.
+        finality_required = end_date is not None
         target_date = (
             date.fromisoformat(end_date) if isinstance(end_date, str) else end_date
         )
@@ -221,6 +244,7 @@ class EquityTrendHistoryRunner:
         hourly = raw_bars["hourly"].copy()
         hourly["timestamp"] = pd.to_datetime(hourly["timestamp"], utc=True)
 
+        final_close_evidence: OfficialFinalCloseEvidence | None = None
         if target_date is not None:
             target_hourly = hourly.loc[
                 hourly["timestamp"]
@@ -317,16 +341,49 @@ class EquityTrendHistoryRunner:
                     "completed intraday evidence."
                 )
 
+            pending_window = CoherentHistoricalWindow(
+                symbol=symbol.upper(),
+                exchange=str(instrument_metadata["resolved_exchange"]),
+                tradingsymbol=str(instrument_metadata["resolved_tradingsymbol"]),
+                instrument_token=int(instrument_metadata["instrument_token"]),
+                target_session_date=target_date,
+                retrieved_at=retrieved_at,
+                finality_status="PENDING_FINALITY",
+                daily=raw_bars["daily"].copy(),
+                hourly=raw_bars["hourly"].copy(),
+                daily_content_hash=bars_content_hash(raw_bars["daily"]),
+                hourly_content_hash=bars_content_hash(raw_bars["hourly"]),
+            )
             retrieved_local = retrieved_at.astimezone(ZoneInfo("Asia/Kolkata"))
-            if retrieved_local.date() == target_date:
-                raise TargetSessionNotFinalized(
-                    f"{symbol.upper()} target session {target_date} is not finalized; "
-                    "same-day historical evidence may still be revised."
-                )
             if retrieved_local.date() < target_date:
                 raise TargetSessionNotFinalized(
-                    f"{symbol.upper()} target session {target_date} is in the future."
+                    f"{symbol.upper()} target session {target_date} is in the future.",
+                    source_window=pending_window,
                 )
+            if finality_required and final_close_resolver is None:
+                raise TargetSessionNotFinalized(
+                    f"{symbol.upper()} target session {target_date} has no official "
+                    "NSE final-close evidence.",
+                    source_window=pending_window,
+                )
+            if finality_required:
+                try:
+                    final_close_evidence = final_close_resolver(
+                        instrument_metadata, target_date
+                    )
+                except (NseFinalCloseUnavailable, NseFinalCloseIdentityError) as exc:
+                    raise TargetSessionNotFinalized(
+                        f"{symbol.upper()} target session {target_date} is pending "
+                        f"official NSE final-close reconciliation: {exc}",
+                        source_window=pending_window,
+                    ) from exc
+                target_close = target_daily.iloc[0]["close"]
+                if not closes_match(target_close, final_close_evidence.close):
+                    raise TargetSessionNotFinalized(
+                        f"{symbol.upper()} target session {target_date} Zerodha close "
+                        "does not match official NSE final evidence.",
+                        source_window=pending_window,
+                    )
 
         if hourly.empty:
             raise RuntimeError(f"No hourly bars found for {symbol}.")
@@ -421,10 +478,37 @@ class EquityTrendHistoryRunner:
                 instrument_token=last_result["instrument_token"],
                 target_session_date=target_date,
                 retrieved_at=retrieved_at,
-                finality_status="FINALIZED",
+                finality_status=(
+                    "FINALIZED" if final_close_evidence is not None else "UNVERIFIED"
+                ),
                 daily=raw_bars["daily"].copy(),
                 hourly=raw_bars["hourly"].copy(),
                 daily_content_hash=bars_content_hash(raw_bars["daily"]),
                 hourly_content_hash=bars_content_hash(raw_bars["hourly"]),
+                finality_source=(
+                    final_close_evidence.instrument_kind
+                    if final_close_evidence is not None
+                    else None
+                ),
+                finality_source_key=(
+                    final_close_evidence.source_name
+                    if final_close_evidence is not None
+                    else None
+                ),
+                finality_source_hash=(
+                    final_close_evidence.source_sha256
+                    if final_close_evidence is not None
+                    else None
+                ),
+                finality_close=(
+                    final_close_evidence.close
+                    if final_close_evidence is not None
+                    else None
+                ),
+                finality_retrieved_at=(
+                    final_close_evidence.retrieved_at
+                    if final_close_evidence is not None
+                    else None
+                ),
             ),
         )
