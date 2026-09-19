@@ -9,11 +9,14 @@ from kiteconnect import KiteConnect
 from kiteconnect.exceptions import TokenException
 
 from services.kite_credentials_service import get_kite_credentials
-from services.nse_final_close import NseFinalCloseProvider, NseFinalCloseUnavailable
-from engines.strategy_deterministic_engine.adapters.trend_identifier_adapter import (
+from services.nse_final_close import (
+    NseFinalCloseProvider,
+    NseFinalCloseUnavailable,
+)
+from engines.strategy_deterministic_engine.adapters.trend_identifier_adapter import (  # noqa: E501
     TrendIdentifierKiteAdapter,
 )
-from engines.trend_identifier.trend_identifier.runners.equity_trend_history_runner import (
+from engines.trend_identifier.trend_identifier.runners.equity_trend_history_runner import (  # noqa: E501
     EquityTrendHistoryRunner,
     TargetSessionNotFinalized,
 )
@@ -54,14 +57,18 @@ def main() -> None:
             except TargetSessionNotFinalized:
                 pending.append(symbol)
     except TokenException:
-        print("FINALITY_READINESS=FAIL reason_code=KITE_AUTHENTICATION", flush=True)
+        print(
+            "FINALITY_READINESS=FAIL reason_code=KITE_AUTHENTICATION",
+            flush=True,
+        )
         raise SystemExit(1) from None
 
     if pending:
         print(
             "FINALITY_READINESS=PENDING reason_code=ZERODHA_NSE_MISMATCH "
             f"run_date={run_date} account={args.user_id} "
-            f"pending_count={len(pending)} pending_symbols={','.join(sorted(pending))}",
+            f"pending_count={len(pending)} "
+            f"pending_symbols={','.join(sorted(pending))}",
             flush=True,
         )
         raise SystemExit(75)

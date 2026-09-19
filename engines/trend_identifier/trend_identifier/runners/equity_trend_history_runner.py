@@ -215,7 +215,10 @@ class EquityTrendHistoryRunner:
             continuous=instrument.exchange.upper() == "NFO",
         )
         normalized_symbol = symbol.strip().upper()
-        if daily.empty and normalized_symbol in GOVERNED_TARGET_DATE_UNAVAILABLE_SYMBOLS:
+        if (
+            daily.empty
+            and normalized_symbol in GOVERNED_TARGET_DATE_UNAVAILABLE_SYMBOLS
+        ):
             intraday = self.equity_runner.fetch_historical_data(
                 instrument_token=instrument.instrument_token,
                 from_dt=from_dt,
@@ -230,7 +233,8 @@ class EquityTrendHistoryRunner:
                 return None
         if daily.empty:
             raise TargetSessionNotFinalized(
-                f"{normalized_symbol} target session {target_date} has no daily candle."
+                f"{normalized_symbol} target session {target_date} "
+                "has no daily candle."
             )
         daily["timestamp"] = pd.to_datetime(daily["timestamp"], utc=True)
         target = daily.loc[
@@ -238,7 +242,8 @@ class EquityTrendHistoryRunner:
         ]
         if len(target.index) != 1:
             raise TargetSessionNotFinalized(
-                f"{normalized_symbol} target session {target_date} does not have one daily candle."
+                f"{normalized_symbol} target session {target_date} does not "
+                "have one daily candle."
             )
         metadata = {
             "resolved_exchange": instrument.exchange,

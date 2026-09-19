@@ -288,7 +288,12 @@ class HistoricalBackfillContractTests(unittest.TestCase):
             )
         )
         self.assertEqual(
-            [call.kwargs["interval"] for call in runner.equity_runner.fetch_historical_data.call_args_list],
+            [
+                call.kwargs["interval"]
+                for call in (
+                    runner.equity_runner.fetch_historical_data.call_args_list
+                )
+            ],
             ["day", "60minute"],
         )
 
