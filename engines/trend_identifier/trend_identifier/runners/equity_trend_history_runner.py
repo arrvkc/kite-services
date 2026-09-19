@@ -189,6 +189,77 @@ class EquityTrendHistoryRunner:
         self.exchange = exchange.upper()
         self.equity_runner = EquityTrendRunner(kite=kite, exchange=self.exchange)
 
+    def check_target_session_finality(
+        self,
+        symbol: str,
+        target_date: date,
+        final_close_resolver: Callable[
+            [dict[str, Any], date], OfficialFinalCloseEvidence
+        ],
+    ) -> OfficialFinalCloseEvidence | None:
+        """Reconcile one minimal Zerodha daily candle before full acquisition."""
+        target_end = datetime.combine(
+            target_date, time.max, tzinfo=ZoneInfo("Asia/Kolkata")
+        )
+        instrument = self.equity_runner.resolve_instrument_asof(symbol, target_end)
+        from_dt = datetime.combine(
+            target_date, time.min, tzinfo=ZoneInfo("Asia/Kolkata")
+        )
+        to_dt = target_end
+        daily = self.equity_runner.fetch_historical_data(
+            instrument_token=instrument.instrument_token,
+            from_dt=from_dt,
+            to_dt=to_dt,
+            interval="day",
+            oi=instrument.exchange.upper() == "NFO",
+            continuous=instrument.exchange.upper() == "NFO",
+        )
+        normalized_symbol = symbol.strip().upper()
+        if daily.empty and normalized_symbol in GOVERNED_TARGET_DATE_UNAVAILABLE_SYMBOLS:
+            intraday = self.equity_runner.fetch_historical_data(
+                instrument_token=instrument.instrument_token,
+                from_dt=from_dt,
+                to_dt=to_dt,
+                interval="60minute",
+                oi=False,
+                continuous=False,
+            )
+            if intraday.empty:
+                # The complete governed acquisition will retain the detailed
+                # prior-observation evidence and apply the existing exclusion.
+                return None
+        if daily.empty:
+            raise TargetSessionNotFinalized(
+                f"{normalized_symbol} target session {target_date} has no daily candle."
+            )
+        daily["timestamp"] = pd.to_datetime(daily["timestamp"], utc=True)
+        target = daily.loc[
+            daily["timestamp"].dt.tz_convert("Asia/Kolkata").dt.date.eq(target_date)
+        ]
+        if len(target.index) != 1:
+            raise TargetSessionNotFinalized(
+                f"{normalized_symbol} target session {target_date} does not have one daily candle."
+            )
+        metadata = {
+            "resolved_exchange": instrument.exchange,
+            "resolved_tradingsymbol": instrument.tradingsymbol,
+            "instrument_token": instrument.instrument_token,
+            "kite_instrument_type": instrument.instrument_type,
+        }
+        try:
+            official = final_close_resolver(metadata, target_date)
+        except (NseFinalCloseUnavailable, NseFinalCloseIdentityError) as exc:
+            raise TargetSessionNotFinalized(
+                f"{normalized_symbol} target session {target_date} is pending official "
+                f"NSE final-close reconciliation: {exc}"
+            ) from exc
+        if not closes_match(target.iloc[0]["close"], official.close):
+            raise TargetSessionNotFinalized(
+                f"{normalized_symbol} target session {target_date} Zerodha close "
+                "does not match official NSE final evidence."
+            )
+        return official
+
     def build_history_for_symbol(
         self,
         symbol: str,

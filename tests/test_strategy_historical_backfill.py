@@ -66,6 +66,9 @@ from engines.trend_identifier.trend_identifier.runners.equity_trend_history_runn
     TargetSessionNotFinalized,
     bars_content_hash,
 )
+from engines.trend_identifier.trend_identifier.runners.equity_trend_runner import (
+    InstrumentMatch,
+)
 
 
 def trend_frame() -> pd.DataFrame:
@@ -219,6 +222,76 @@ class CapturingDbAdapter(TrendIdentifierDbAdapter):
 
 
 class HistoricalBackfillContractTests(unittest.TestCase):
+    def test_minimal_finality_readiness_matches_official_close(self):
+        runner = EquityTrendHistoryRunner.__new__(EquityTrendHistoryRunner)
+        runner.exchange = "NSE"
+        runner.equity_runner = MagicMock()
+        runner.equity_runner.resolve_instrument_asof.return_value = InstrumentMatch(
+            instrument_token=123,
+            exchange="NSE",
+            tradingsymbol="ABC",
+            name="ABC",
+            segment="NSE",
+            instrument_type="EQ",
+        )
+        runner.equity_runner.fetch_historical_data.return_value = pd.DataFrame(
+            [{
+                "timestamp": pd.Timestamp("2026-09-08T00:00:00+05:30"),
+                "open": 99,
+                "high": 105,
+                "low": 98,
+                "close": 104,
+                "volume": 1000,
+            }]
+        )
+        evidence = runner.check_target_session_finality(
+            "ABC",
+            date(2026, 9, 8),
+            lambda _instrument, target: official_close("ABC", target, 104),
+        )
+        self.assertEqual(evidence.close, Decimal("104"))
+        runner.equity_runner.fetch_historical_data.assert_called_once()
+        kwargs = runner.equity_runner.fetch_historical_data.call_args.kwargs
+        self.assertEqual(kwargs["interval"], "day")
+        self.assertFalse(kwargs["continuous"])
+
+        with self.assertRaisesRegex(
+            TargetSessionNotFinalized, "does not match official NSE final"
+        ):
+            runner.check_target_session_finality(
+                "ABC",
+                date(2026, 9, 8),
+                lambda _instrument, target: official_close("ABC", target, 104.05),
+            )
+
+    def test_minimal_readiness_preserves_governed_missing_target_exclusion(self):
+        runner = EquityTrendHistoryRunner.__new__(EquityTrendHistoryRunner)
+        runner.exchange = "NSE"
+        runner.equity_runner = MagicMock()
+        runner.equity_runner.resolve_instrument_asof.return_value = InstrumentMatch(
+            instrument_token=123,
+            exchange="NFO",
+            tradingsymbol="NIFTYFPI26SEPFUT",
+            name="NIFTYFPI",
+            segment="NFO-FUT",
+            instrument_type="FUT",
+        )
+        runner.equity_runner.fetch_historical_data.side_effect = [
+            pd.DataFrame(),
+            pd.DataFrame(),
+        ]
+        self.assertIsNone(
+            runner.check_target_session_finality(
+                "NIFTYFPI",
+                date(2026, 9, 8),
+                MagicMock(),
+            )
+        )
+        self.assertEqual(
+            [call.kwargs["interval"] for call in runner.equity_runner.fetch_historical_data.call_args_list],
+            ["day", "60minute"],
+        )
+
     def _coherent_history_result(
         self, symbol, closes, *, retrieved_at=None, official_value=None
     ):

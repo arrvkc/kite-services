@@ -201,11 +201,7 @@ class EquityTrendRunner:
         daily_lookback_days: int = 900,
         hourly_lookback_days: int = 120,
     ) -> tuple[Dict[str, pd.DataFrame], Dict[str, Any]]:
-        symbol_upper = symbol.upper()
-        if symbol_upper in self._get_nse_equity_symbols():
-            instrument = self.resolve_equity_instrument(symbol_upper)
-        else:
-            instrument = self.resolve_futures_instrument(symbol_upper, asof_time)
+        instrument = self.resolve_instrument_asof(symbol, asof_time)
         asof_dt = self._normalize_asof_time(asof_time)
 
         if instrument.exchange == "NFO":
@@ -264,6 +260,13 @@ class EquityTrendRunner:
         }
 
         return raw_bars, instrument_metadata
+
+    def resolve_instrument_asof(self, symbol: str, asof_time: Any) -> InstrumentMatch:
+        """Resolve the same authoritative instrument used by full acquisition."""
+        symbol_upper = symbol.upper()
+        if symbol_upper in self._get_nse_equity_symbols():
+            return self.resolve_equity_instrument(symbol_upper)
+        return self.resolve_futures_instrument(symbol_upper, asof_time)
 
     def build_raw_bars_for_symbol(
         self,

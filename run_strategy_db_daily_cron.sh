@@ -8,18 +8,7 @@ PYTHON_BIN="${EAJEE_KITE_PYTHON:-$APP_DIR/venv/bin/python}"
 RUN_DATE="${EAJEE_STRATEGY_RUN_DATE:-$(date '+%Y-%m-%d')}"
 RUN_TS="$(date '+%Y-%m-%d_%H-%M-%S')"
 
-USER_ID="XJ1877"
-FINALITY_RETRY_ATTEMPTS="${EAJEE_STRATEGY_FINALITY_RETRY_ATTEMPTS:-3}"
-FINALITY_RETRY_SECONDS="${EAJEE_STRATEGY_FINALITY_RETRY_SECONDS:-300}"
-
-if [[ ! "$FINALITY_RETRY_ATTEMPTS" =~ ^[1-5]$ ]]; then
-  echo "Invalid EAJEE_STRATEGY_FINALITY_RETRY_ATTEMPTS" >&2
-  exit 64
-fi
-if [[ ! "$FINALITY_RETRY_SECONDS" =~ ^[0-9]+$ ]] || (( FINALITY_RETRY_SECONDS > 900 )); then
-  echo "Invalid EAJEE_STRATEGY_FINALITY_RETRY_SECONDS" >&2
-  exit 64
-fi
+USER_ID="${EAJEE_STRATEGY_USER_ID:-XJ1877}"
 
 mkdir -p "$LOG_DIR"
 
@@ -55,43 +44,39 @@ echo "==================================================" >> "$MASTER_LOG"
 {
   echo ""
   echo "--------------------------------------------------"
-  echo "STEP 1: EXACT-DATE TREND HISTORY SYNC AND VALIDATION"
+  echo "STEP 1: TARGET-SESSION FINALITY READINESS"
   echo "START: $(date '+%Y-%m-%d %H:%M:%S')"
   echo "--------------------------------------------------"
 
-  attempt=1
-  while true; do
-    set +e
-    PYTHONPATH=.:services "$PYTHON_BIN" \
-      engines/strategy_deterministic_engine/scripts/sync_trend_history_fo_universe_to_db.py \
-      "$USER_ID" \
-      --history-days 5 \
-      --end-date "$RUN_DATE" \
-      --strict
-    trend_rc=$?
-    set -e
-    if (( trend_rc == 0 )); then
-      break
-    fi
-    if (( trend_rc != 75 || attempt >= FINALITY_RETRY_ATTEMPTS )); then
-      exit "$trend_rc"
-    fi
-    echo "FINALITY_RETRY pending attempt=$attempt/$FINALITY_RETRY_ATTEMPTS"
-    sleep "$FINALITY_RETRY_SECONDS"
-    attempt=$((attempt + 1))
-  done
+  PYTHONPATH=.:services "$PYTHON_BIN" \
+    engines/strategy_deterministic_engine/scripts/check_strategy_finality_readiness.py \
+    "$USER_ID" --run-date "$RUN_DATE"
 
   echo "--------------------------------------------------"
   echo "STEP 1 COMPLETE"
   echo "END: $(date '+%Y-%m-%d %H:%M:%S')"
   echo "--------------------------------------------------"
 
+} >> "$LOG_DIR/finality_readiness_$RUN_TS.log" 2>&1
+
+{
+  echo ""
+  echo "--------------------------------------------------"
+  echo "STEP 2: EXACT-DATE TREND HISTORY SYNC AND VALIDATION"
+  echo "START: $(date '+%Y-%m-%d %H:%M:%S')"
+  echo "--------------------------------------------------"
+
+  PYTHONPATH=.:services "$PYTHON_BIN" \
+    engines/strategy_deterministic_engine/scripts/sync_trend_history_fo_universe_to_db.py \
+    "$USER_ID" --history-days 5 --end-date "$RUN_DATE" --strict
+
+  echo "STEP 2 COMPLETE"
 } >> "$LOG_DIR/trend_history_sync_$RUN_TS.log" 2>&1
 
 {
   echo ""
   echo "--------------------------------------------------"
-  echo "STEP 2: EXACT-DATE CONTRACT SNAPSHOT SYNC AND VALIDATION"
+  echo "STEP 3: EXACT-DATE CONTRACT SNAPSHOT SYNC AND VALIDATION"
   echo "START: $(date '+%Y-%m-%d %H:%M:%S')"
   echo "--------------------------------------------------"
 
@@ -102,7 +87,7 @@ echo "==================================================" >> "$MASTER_LOG"
     --strict
 
   echo "--------------------------------------------------"
-  echo "STEP 2 COMPLETE"
+  echo "STEP 3 COMPLETE"
   echo "END: $(date '+%Y-%m-%d %H:%M:%S')"
   echo "--------------------------------------------------"
 
@@ -111,7 +96,7 @@ echo "==================================================" >> "$MASTER_LOG"
 {
   echo ""
   echo "--------------------------------------------------"
-  echo "STEP 3: EXACT-DATE INPUT GATE"
+  echo "STEP 4: EXACT-DATE INPUT GATE"
   echo "START: $(date '+%Y-%m-%d %H:%M:%S')"
   echo "--------------------------------------------------"
 
@@ -122,7 +107,7 @@ echo "==================================================" >> "$MASTER_LOG"
     --history-days 5
 
   echo "--------------------------------------------------"
-  echo "STEP 3 COMPLETE"
+  echo "STEP 4 COMPLETE"
   echo "END: $(date '+%Y-%m-%d %H:%M:%S')"
   echo "--------------------------------------------------"
 
@@ -131,7 +116,7 @@ echo "==================================================" >> "$MASTER_LOG"
 {
   echo ""
   echo "--------------------------------------------------"
-  echo "STEP 4: STRATEGY ENGINE RUN"
+  echo "STEP 5: STRATEGY ENGINE RUN"
   echo "START: $(date '+%Y-%m-%d %H:%M:%S')"
   echo "--------------------------------------------------"
 
@@ -143,7 +128,7 @@ echo "==================================================" >> "$MASTER_LOG"
     --require-exact-contract-snapshot
 
   echo "--------------------------------------------------"
-  echo "STEP 4 COMPLETE"
+  echo "STEP 5 COMPLETE"
   echo "END: $(date '+%Y-%m-%d %H:%M:%S')"
   echo "--------------------------------------------------"
 

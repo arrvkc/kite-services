@@ -19,6 +19,7 @@ prepare() {
 printf '%s\n' "$*" >> "$EAJEE_DAILY_TEST_CALLS"
 case "$*" in
   *validate_strategy_kite_credentials*) [[ "${FAIL_STAGE:-}" = credential ]] && exit 20 ;;
+  *check_strategy_finality_readiness*) [[ "${FAIL_STAGE:-}" = finality ]] && exit 75 ;;
   *sync_trend_history*) [[ "${FAIL_STAGE:-}" = trend ]] && exit 21 ;;
   *sync_contract_snapshot*) [[ "${FAIL_STAGE:-}" = contract ]] && exit 22 ;;
   *verify_strategy_backfill_inputs*) [[ "${FAIL_STAGE:-}" = exact_input ]] && exit 23 ;;
@@ -52,19 +53,22 @@ assert_stops_after() {
 
 assert_stops_after credential 1
 echo "PASS invalid credential stops before Trend"
-assert_stops_after trend 2
+assert_stops_after finality 2
+echo "PASS pending finality stops before full historical acquisition"
+assert_stops_after trend 3
 echo "PASS Trend failure stops Contract and Strategy"
-assert_stops_after contract 3
+assert_stops_after contract 4
 echo "PASS Contract failure stops exact gate and Strategy"
-assert_stops_after exact_input 4
+assert_stops_after exact_input 5
 echo "PASS exact-input failure stops Strategy"
-assert_stops_after strategy 5
+assert_stops_after strategy 6
 echo "PASS Strategy failure propagates"
 
 prepare
 run_pipeline >/dev/null
-[[ "$(wc -l < "$ROOT/calls" | tr -d ' ')" = 5 ]] || fail "successful stage count changed"
+[[ "$(wc -l < "$ROOT/calls" | tr -d ' ')" = 6 ]] || fail "successful stage count changed"
 grep -Fq 'validate_strategy_kite_credentials.py XJ1877' "$ROOT/calls"
+grep -Fq 'check_strategy_finality_readiness.py XJ1877 --run-date 2026-08-31' "$ROOT/calls"
 grep -Fq 'sync_trend_history_fo_universe_to_db.py XJ1877 --history-days 5 --end-date 2026-08-31 --strict' "$ROOT/calls"
 grep -Fq 'sync_contract_snapshot_fo_universe_to_db.py XJ1877 --selection-date 2026-08-31 --strict' "$ROOT/calls"
 grep -Fq 'verify_strategy_backfill_inputs.py --run-date 2026-08-31 --user-id XJ1877 --history-days 5' "$ROOT/calls"
@@ -74,22 +78,5 @@ if grep -Fq 'email_strategy_report.py' "$PIPELINE"; then
 fi
 echo "PASS daily pipeline uses exact-date fail-closed contract and does not email"
 
-prepare
-cat > "$ROOT/python" <<'SH'
-#!/usr/bin/env bash
-printf '%s\n' "$*" >> "$EAJEE_DAILY_TEST_CALLS"
-if [[ "$*" == *sync_trend_history* ]]; then
-  count="$(grep -c 'sync_trend_history' "$EAJEE_DAILY_TEST_CALLS")"
-  (( count < 3 )) && exit 75
-fi
-exit 0
-SH
-chmod 0755 "$ROOT/python"
-EAJEE_STRATEGY_FINALITY_RETRY_ATTEMPTS=3 \
-EAJEE_STRATEGY_FINALITY_RETRY_SECONDS=0 \
-  run_pipeline >/dev/null
-[[ "$(grep -c 'sync_trend_history' "$ROOT/calls")" = 3 ]] || \
-  fail "retryable finality did not run the bounded whole-acquisition retry"
-[[ "$(wc -l < "$ROOT/calls" | tr -d ' ')" = 7 ]] || \
-  fail "finality retry changed downstream stage sequencing"
-echo "PASS retryable finality is bounded and resumes the normal pipeline"
+! grep -Fq 'sleep ' "$PIPELINE" || fail "Kite pipeline still sleeps while a caller lock may be held"
+echo "PASS one cron invocation performs one efficient finality attempt"
