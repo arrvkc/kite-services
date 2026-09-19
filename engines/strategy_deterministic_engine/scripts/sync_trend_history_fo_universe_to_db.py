@@ -27,6 +27,7 @@ from engines.trend_identifier.trend_identifier.runners.equity_trend_history_runn
 )
 from engines.strategy_deterministic_engine.db.postgres import get_engine
 from engines.strategy_deterministic_engine.db.upserts import (
+    historical_snapshot_manifest_hash,
     persist_strict_trend_preparation,
     persist_pending_historical_acquisition,
     upsert_trend_history_rows,
@@ -225,7 +226,33 @@ def build_symbol_rows(args, result) -> list[dict]:
     return symbol_rows
 
 
-def dataset_identity_hash(*, result, interval: str, content_hash: str) -> str:
+def chunk_key_for_timestamp(interval: str, timestamp: object) -> str:
+    observed_at = pd.Timestamp(timestamp)
+    if observed_at.tzinfo is None:
+        raise RuntimeError("Historical chunk timestamps must be timezone-aware.")
+    local = observed_at.tz_convert("Asia/Kolkata")
+    if interval == "day":
+        return f"{local.year:04d}-{local.month:02d}"
+    if interval == "60minute":
+        iso_year, iso_week, _ = local.date().isocalendar()
+        return f"{iso_year:04d}-W{iso_week:02d}"
+    raise RuntimeError(f"Unsupported historical chunk interval: {interval}.")
+
+
+def canonical_bar_content_hash(bars: list[dict]) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            bars,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def chunk_identity_hash(
+    *, result, interval: str, chunk_key: str, content_hash: str
+) -> str:
     payload = {
         "source": "ZERODHA_HISTORICAL_DATA",
         "symbol": result.symbol,
@@ -233,6 +260,7 @@ def dataset_identity_hash(*, result, interval: str, content_hash: str) -> str:
         "tradingsymbol": result.tradingsymbol,
         "instrument_token": int(result.instrument_token),
         "interval": interval,
+        "chunk_key": chunk_key,
         "content_hash": content_hash,
     }
     return hashlib.sha256(
@@ -240,16 +268,71 @@ def dataset_identity_hash(*, result, interval: str, content_hash: str) -> str:
     ).hexdigest()
 
 
+def partition_canonical_bars(interval: str, bars: list[dict]) -> list[dict]:
+    if not bars:
+        raise RuntimeError(f"Historical {interval} acquisition is empty.")
+    chunks: list[dict] = []
+    seen_keys: set[str] = set()
+    previous_timestamp = None
+    for bar in bars:
+        observed_at = pd.Timestamp(bar["timestamp"])
+        if previous_timestamp is not None and observed_at <= previous_timestamp:
+            raise RuntimeError(
+                "Historical source timestamps must be unique and strictly increasing."
+            )
+        previous_timestamp = observed_at
+        chunk_key = chunk_key_for_timestamp(interval, observed_at)
+        if not chunks or chunks[-1]["chunk_key"] != chunk_key:
+            if chunk_key in seen_keys:
+                raise RuntimeError("Historical chunk boundaries are not monotonic.")
+            chunks.append({"chunk_key": chunk_key, "bars": []})
+            seen_keys.add(chunk_key)
+        chunks[-1]["bars"].append(bar)
+    return chunks
+
+
+def reconstruct_snapshot_bars(
+    chunk_references: list[dict], *, expected_bars: list[dict] | None = None
+) -> list[dict]:
+    if not chunk_references:
+        raise RuntimeError("Historical snapshot has no chunk references.")
+    reconstructed: list[dict] = []
+    previous_timestamp = None
+    seen_keys: set[str] = set()
+    for expected_ordinal, reference in enumerate(chunk_references):
+        if reference["ordinal"] != expected_ordinal:
+            raise RuntimeError("Historical snapshot chunk ordinals are incomplete.")
+        chunk_key = reference["chunk_key"]
+        if chunk_key in seen_keys:
+            raise RuntimeError("Historical snapshot chunk keys overlap.")
+        seen_keys.add(chunk_key)
+        chunk_bars = reference.get("bars") or []
+        if not chunk_bars:
+            raise RuntimeError("Historical snapshot contains an empty chunk.")
+        for bar in chunk_bars:
+            observed_at = pd.Timestamp(bar["timestamp"])
+            if chunk_key_for_timestamp(reference["interval"], observed_at) != chunk_key:
+                raise RuntimeError("Historical bar falls outside its chunk boundary.")
+            if previous_timestamp is not None and observed_at <= previous_timestamp:
+                raise RuntimeError("Historical snapshot chunks overlap or are out of order.")
+            reconstructed.append(bar)
+            previous_timestamp = observed_at
+    if expected_bars is not None and reconstructed != expected_bars:
+        raise RuntimeError("Historical snapshot chunks do not reconstruct the source window.")
+    return reconstructed
+
+
 def build_window_evidence(acquisition_id: str, args, result) -> dict:
     """Serialize one coherent source window without publishing analytics."""
     window = result.source_window
-    datasets = []
+    chunks = []
     snapshots = []
+    snapshot_chunks = []
     bars = []
     daily_snapshot_id = None
-    for interval, frame, content_hash in (
-        ("day", window.daily, window.daily_content_hash),
-        ("60minute", window.hourly, window.hourly_content_hash),
+    for interval, frame in (
+        ("day", window.daily),
+        ("60minute", window.hourly),
     ):
         snapshot_id = str(uuid.uuid4())
         if interval == "day":
@@ -257,31 +340,75 @@ def build_window_evidence(acquisition_id: str, args, result) -> dict:
         canonical = canonical_bars(frame)
         if not canonical:
             raise RuntimeError(f"{result.symbol} {interval} acquisition is empty.")
-        dataset_id = dataset_identity_hash(
-            result=result,
-            interval=interval,
-            content_hash=content_hash,
-        )
-        datasets.append(
-            {
-                "id": dataset_id,
-                "source": "ZERODHA_HISTORICAL_DATA",
-                "symbol": result.symbol,
-                "exchange": result.exchange,
-                "tradingsymbol": result.tradingsymbol,
-                "instrument_token": result.instrument_token,
+        references = []
+        for ordinal, partition in enumerate(
+            partition_canonical_bars(interval, canonical)
+        ):
+            chunk_bars = partition["bars"]
+            chunk_key = partition["chunk_key"]
+            content_hash = canonical_bar_content_hash(chunk_bars)
+            chunk_id = chunk_identity_hash(
+                result=result,
+                interval=interval,
+                chunk_key=chunk_key,
+                content_hash=content_hash,
+            )
+            covered_from = pd.Timestamp(chunk_bars[0]["timestamp"]).to_pydatetime()
+            covered_to = pd.Timestamp(chunk_bars[-1]["timestamp"]).to_pydatetime()
+            chunks.append(
+                {
+                    "id": chunk_id,
+                    "source": "ZERODHA_HISTORICAL_DATA",
+                    "symbol": result.symbol,
+                    "exchange": result.exchange,
+                    "tradingsymbol": result.tradingsymbol,
+                    "instrument_token": result.instrument_token,
+                    "interval": interval,
+                    "chunk_key": chunk_key,
+                    "covered_from": covered_from,
+                    "covered_to": covered_to,
+                    "bar_count": len(chunk_bars),
+                    "content_hash": content_hash,
+                }
+            )
+            reference = {
+                "snapshot_id": snapshot_id,
+                "chunk_id": chunk_id,
+                "ordinal": ordinal,
+                "chunk_key": chunk_key,
                 "interval": interval,
-                "covered_from": pd.Timestamp(frame["timestamp"].min()).to_pydatetime(),
-                "covered_to": pd.Timestamp(frame["timestamp"].max()).to_pydatetime(),
-                "bar_count": len(canonical),
-                "content_hash": content_hash,
+                "bars": chunk_bars,
             }
-        )
+            references.append(reference)
+            snapshot_chunks.append(
+                {
+                    "snapshot_id": snapshot_id,
+                    "chunk_id": chunk_id,
+                    "ordinal": ordinal,
+                    "chunk_key": chunk_key,
+                }
+            )
+            for item in chunk_bars:
+                observed_at = pd.Timestamp(item["timestamp"])
+                bars.append(
+                    {
+                        "chunk_id": chunk_id,
+                        "observed_at": observed_at.to_pydatetime(),
+                        "session_date": observed_at.tz_convert("Asia/Kolkata").date(),
+                        "open": item["open"],
+                        "high": item["high"],
+                        "low": item["low"],
+                        "close": item["close"],
+                        "volume": item["volume"],
+                        "oi": item["oi"],
+                    }
+                )
+        reconstruct_snapshot_bars(references, expected_bars=canonical)
+        manifest_hash = historical_snapshot_manifest_hash(references)
         snapshots.append(
             {
                 "id": snapshot_id,
                 "acquisition_id": acquisition_id,
-                "dataset_id": dataset_id,
                 "source_account": args.user_id,
                 "symbol": result.symbol,
                 "exchange": result.exchange,
@@ -293,7 +420,7 @@ def build_window_evidence(acquisition_id: str, args, result) -> dict:
                 "covered_to": pd.Timestamp(frame["timestamp"].max()).to_pydatetime(),
                 "retrieved_at": window.retrieved_at,
                 "bar_count": len(canonical),
-                "content_hash": content_hash,
+                "content_hash": manifest_hash,
                 "validation_status": window.finality_status,
                 "finality_source": (
                     window.finality_source if interval == "day" else None
@@ -312,26 +439,12 @@ def build_window_evidence(acquisition_id: str, args, result) -> dict:
                 ),
             }
         )
-        for item in canonical:
-            observed_at = pd.Timestamp(item["timestamp"])
-            bars.append(
-                {
-                    "dataset_id": dataset_id,
-                    "observed_at": observed_at.to_pydatetime(),
-                    "session_date": observed_at.tz_convert("Asia/Kolkata").date(),
-                    "open": item["open"],
-                    "high": item["high"],
-                    "low": item["low"],
-                    "close": item["close"],
-                    "volume": item["volume"],
-                    "oi": item["oi"],
-                }
-            )
     if daily_snapshot_id is None:
         raise RuntimeError("A daily historical snapshot is required.")
     return {
-        "datasets": datasets,
+        "chunks": chunks,
         "snapshots": snapshots,
+        "snapshot_chunks": snapshot_chunks,
         "bars": bars,
         "daily_snapshot_id": daily_snapshot_id,
     }
@@ -350,8 +463,9 @@ def build_acquisition_evidence(acquisition_id: str, args, result) -> dict:
             }
         )
     return {
-        "datasets": evidence["datasets"],
+        "chunks": evidence["chunks"],
         "snapshots": evidence["snapshots"],
+        "snapshot_chunks": evidence["snapshot_chunks"],
         "bars": evidence["bars"],
         "trend_outputs": trend_outputs,
     }
@@ -362,7 +476,6 @@ def acquisition_content_hash(snapshots: list[dict]) -> str:
         {
             "symbol": item["symbol"],
             "interval": item["interval"],
-            "dataset_id": item["dataset_id"],
             "content_hash": item["content_hash"],
         }
         for item in sorted(
@@ -411,8 +524,9 @@ def main() -> None:
     strict_rows: list[dict] = []
     prepared_symbols: set[str] = set()
     acquisition_id = str(uuid.uuid4())
-    acquisition_datasets: list[dict] = []
+    acquisition_chunks: list[dict] = []
     acquisition_snapshots: list[dict] = []
+    acquisition_snapshot_chunks: list[dict] = []
     acquisition_bars: list[dict] = []
     immutable_trend_outputs: list[dict] = []
 
@@ -430,8 +544,9 @@ def main() -> None:
 
             if args.strict and not args.dry_run:
                 evidence = build_acquisition_evidence(acquisition_id, args, result)
-                acquisition_datasets.extend(evidence["datasets"])
+                acquisition_chunks.extend(evidence["chunks"])
                 acquisition_snapshots.extend(evidence["snapshots"])
+                acquisition_snapshot_chunks.extend(evidence["snapshot_chunks"])
                 acquisition_bars.extend(evidence["bars"])
                 immutable_trend_outputs.extend(evidence["trend_outputs"])
 
@@ -477,8 +592,9 @@ def main() -> None:
                 evidence = build_window_evidence(
                     acquisition_id, args, pending_result
                 )
-                acquisition_datasets.extend(evidence["datasets"])
+                acquisition_chunks.extend(evidence["chunks"])
                 acquisition_snapshots.extend(evidence["snapshots"])
+                acquisition_snapshot_chunks.extend(evidence["snapshot_chunks"])
                 acquisition_bars.extend(evidence["bars"])
             print(
                 f"[{index}/{len(symbols)}] PENDING {symbol}: "
@@ -574,8 +690,9 @@ def main() -> None:
                         "content_hash": acquisition_content_hash(
                             acquisition_snapshots
                         ),
-                        "datasets": acquisition_datasets,
+                        "chunks": acquisition_chunks,
                         "snapshots": acquisition_snapshots,
+                        "snapshot_chunks": acquisition_snapshot_chunks,
                         "bars": acquisition_bars,
                     },
                     batch_size=args.batch_size,
@@ -637,8 +754,9 @@ def main() -> None:
                     "content_hash": acquisition_content_hash(
                         acquisition_snapshots
                     ),
-                    "datasets": acquisition_datasets,
+                    "chunks": acquisition_chunks,
                     "snapshots": acquisition_snapshots,
+                    "snapshot_chunks": acquisition_snapshot_chunks,
                     "bars": acquisition_bars,
                     "trend_outputs": immutable_trend_outputs,
                 },

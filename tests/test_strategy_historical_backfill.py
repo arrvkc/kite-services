@@ -28,6 +28,7 @@ from engines.strategy_deterministic_engine.db.upserts import (
     PREPARE_STRATEGY_RUN_SQL,
     persist_pending_historical_acquisition,
     persist_strict_trend_preparation,
+    validate_historical_chunk_manifests,
 )
 from engines.strategy_deterministic_engine.scripts import (
     sync_contract_snapshot_fo_universe_to_db as contract_sync,
@@ -192,7 +193,8 @@ def acquisition_fixture(acquisition_id: str = "acquisition-1") -> dict:
         "finality_status": "FINALIZED",
         "content_hash": "a" * 64,
         "snapshots": [],
-        "datasets": [],
+        "chunks": [],
+        "snapshot_chunks": [],
         "bars": [],
         "trend_outputs": [],
     }
@@ -335,11 +337,11 @@ class HistoricalBackfillContractTests(unittest.TestCase):
             for item in revised_evidence["snapshots"]
         ))
         self.assertNotEqual(
-            first_evidence["datasets"][0]["id"],
-            revised_evidence["datasets"][0]["id"],
+            first_evidence["chunks"][0]["id"],
+            revised_evidence["chunks"][0]["id"],
         )
 
-    def test_identical_content_reuses_dataset_with_distinct_acquisitions(self):
+    def test_identical_content_reuses_chunks_with_distinct_acquisitions(self):
         result, _ = self._coherent_history_result(
             "NORMAL", [100.0, 101.0, 102.0]
         )
@@ -350,11 +352,11 @@ class HistoricalBackfillContractTests(unittest.TestCase):
             "acquisition-2", SimpleNamespace(user_id="XJ1877"), result
         )
         self.assertNotEqual(first["snapshots"][0]["id"], second["snapshots"][0]["id"])
-        self.assertEqual(first["datasets"][0]["id"], second["datasets"][0]["id"])
-        self.assertEqual(first["bars"][0]["dataset_id"], second["bars"][0]["dataset_id"])
+        self.assertEqual(first["chunks"][0]["id"], second["chunks"][0]["id"])
+        self.assertEqual(first["bars"][0]["chunk_id"], second["bars"][0]["chunk_id"])
         self.assertNotIn("snapshot_id", first["bars"][0])
 
-    def test_dataset_identity_cannot_cross_symbol_or_interval(self):
+    def test_chunk_identity_cannot_cross_symbol_or_interval(self):
         result, _ = self._coherent_history_result(
             "NORMAL", [100.0, 101.0, 102.0]
         )
@@ -365,8 +367,101 @@ class HistoricalBackfillContractTests(unittest.TestCase):
         other = build_acquisition_evidence(
             "acquisition-2", SimpleNamespace(user_id="XJ1877"), other_symbol
         )
-        self.assertNotEqual(normal["datasets"][0]["id"], other["datasets"][0]["id"])
-        self.assertNotEqual(normal["datasets"][0]["id"], normal["datasets"][1]["id"])
+        self.assertNotEqual(normal["chunks"][0]["id"], other["chunks"][0]["id"])
+        self.assertNotEqual(normal["chunks"][0]["id"], normal["chunks"][1]["id"])
+
+    def _with_source_frames(self, result, daily, hourly):
+        window = replace(
+            result.source_window,
+            daily=daily,
+            hourly=hourly,
+            daily_content_hash=bars_content_hash(daily),
+            hourly_content_hash=bars_content_hash(hourly),
+        )
+        return replace(result, source_window=window)
+
+    def test_daily_revision_replaces_only_affected_calendar_month_chunk(self):
+        result, _ = self._coherent_history_result("NORMAL", [100.0] * 5)
+        dates = pd.date_range("2026-05-04", "2026-06-12", freq="B", tz="Asia/Kolkata")
+        daily = pd.DataFrame({
+            "timestamp": dates,
+            "open": [100.0] * len(dates), "high": [102.0] * len(dates),
+            "low": [98.0] * len(dates), "close": [100.0] * len(dates),
+            "volume": [1000] * len(dates),
+        })
+        first_result = self._with_source_frames(result, daily, result.source_window.hourly)
+        revised_daily = daily.copy()
+        revised_daily.loc[revised_daily["timestamp"].dt.month == 5, "close"] = 99.5
+        revised_result = self._with_source_frames(
+            result, revised_daily, result.source_window.hourly
+        )
+        first = build_acquisition_evidence("a1", SimpleNamespace(user_id="XJ1877"), first_result)
+        revised = build_acquisition_evidence("a2", SimpleNamespace(user_id="XJ1877"), revised_result)
+        first_ids = {(c["interval"], c["chunk_key"]): c["id"] for c in first["chunks"]}
+        revised_ids = {(c["interval"], c["chunk_key"]): c["id"] for c in revised["chunks"]}
+        self.assertNotEqual(first_ids[("day", "2026-05")], revised_ids[("day", "2026-05")])
+        self.assertEqual(first_ids[("day", "2026-06")], revised_ids[("day", "2026-06")])
+        self.assertEqual(
+            {k: v for k, v in first_ids.items() if k[0] == "60minute"},
+            {k: v for k, v in revised_ids.items() if k[0] == "60minute"},
+        )
+
+    def test_intraday_revision_replaces_only_affected_iso_week_chunk(self):
+        result, _ = self._coherent_history_result("NORMAL", [100.0] * 10)
+        hourly = result.source_window.hourly.copy()
+        first_result = self._with_source_frames(result, result.source_window.daily, hourly)
+        revised_hourly = hourly.copy()
+        first_week = revised_hourly["timestamp"].iloc[0].isocalendar().week
+        mask = revised_hourly["timestamp"].map(lambda value: value.isocalendar().week == first_week)
+        revised_hourly.loc[mask, "close"] = 99.5
+        revised_result = self._with_source_frames(
+            result, result.source_window.daily, revised_hourly
+        )
+        first = build_acquisition_evidence("a1", SimpleNamespace(user_id="XJ1877"), first_result)
+        revised = build_acquisition_evidence("a2", SimpleNamespace(user_id="XJ1877"), revised_result)
+        first_ids = {(c["interval"], c["chunk_key"]): c["id"] for c in first["chunks"]}
+        revised_ids = {(c["interval"], c["chunk_key"]): c["id"] for c in revised["chunks"]}
+        changed = [key for key in first_ids if first_ids[key] != revised_ids[key]]
+        self.assertEqual(changed, [("60minute", f"2026-W{first_week:02d}")])
+
+    def test_snapshot_reconstruction_rejects_missing_and_overlapping_references(self):
+        bars = [{
+            "timestamp": "2026-05-18T00:00:00+05:30", "open": "1",
+            "high": "1", "low": "1", "close": "1", "volume": "1", "oi": None,
+        }]
+        valid = [{
+            "ordinal": 0, "chunk_key": "2026-05", "chunk_id": "a",
+            "interval": "day", "bars": bars,
+        }]
+        self.assertEqual(trend_sync.reconstruct_snapshot_bars(valid), bars)
+        with self.assertRaisesRegex(RuntimeError, "ordinals are incomplete"):
+            trend_sync.reconstruct_snapshot_bars([{**valid[0], "ordinal": 1}])
+        with self.assertRaisesRegex(RuntimeError, "falls outside its chunk boundary"):
+            trend_sync.reconstruct_snapshot_bars(valid + [{
+                **valid[0], "ordinal": 1, "chunk_key": "2026-06", "chunk_id": "b",
+            }])
+        with self.assertRaisesRegex(RuntimeError, "chunk keys overlap"):
+            trend_sync.reconstruct_snapshot_bars(valid + [{
+                **valid[0], "ordinal": 1, "chunk_id": "b",
+            }])
+
+    def test_manifest_validation_rejects_missing_and_cross_symbol_chunks(self):
+        result, _ = self._coherent_history_result("NORMAL", [100.0] * 5)
+        evidence = build_acquisition_evidence(
+            "a1", SimpleNamespace(user_id="XJ1877"), result
+        )
+        acquisition = {
+            "chunks": evidence["chunks"], "snapshots": evidence["snapshots"],
+            "snapshot_chunks": evidence["snapshot_chunks"],
+        }
+        validate_historical_chunk_manifests(acquisition)
+        missing = {**acquisition, "snapshot_chunks": acquisition["snapshot_chunks"][1:]}
+        with self.assertRaisesRegex(RuntimeError, "has no chunk references"):
+            validate_historical_chunk_manifests(missing)
+        crossed_chunks = [dict(item) for item in acquisition["chunks"]]
+        crossed_chunks[0]["symbol"] = "OTHER"
+        with self.assertRaisesRegex(RuntimeError, "cross-identity chunk"):
+            validate_historical_chunk_manifests({**acquisition, "chunks": crossed_chunks})
 
     def test_identical_content_is_physically_stored_once_for_two_acquisitions(self):
         engine = create_engine("sqlite://")
@@ -381,11 +476,12 @@ class HistoricalBackfillContractTests(unittest.TestCase):
                 )
             """))
             connection.execute(text("""
-                CREATE TABLE historical_price_datasets (
+                CREATE TABLE historical_price_chunks (
                     id VARCHAR(64) PRIMARY KEY, source VARCHAR NOT NULL,
                     symbol VARCHAR NOT NULL, exchange VARCHAR NOT NULL,
                     tradingsymbol VARCHAR NOT NULL, instrument_token BIGINT NOT NULL,
-                    interval VARCHAR NOT NULL, covered_from TIMESTAMP NOT NULL,
+                    interval VARCHAR NOT NULL, chunk_key VARCHAR NOT NULL,
+                    covered_from TIMESTAMP NOT NULL,
                     covered_to TIMESTAMP NOT NULL, bar_count INTEGER NOT NULL,
                     content_hash VARCHAR NOT NULL
                 )
@@ -393,7 +489,7 @@ class HistoricalBackfillContractTests(unittest.TestCase):
             connection.execute(text("""
                 CREATE TABLE historical_price_snapshots (
                     id VARCHAR(36) PRIMARY KEY, acquisition_id VARCHAR(36) NOT NULL,
-                    dataset_id VARCHAR(64) NOT NULL, source_account VARCHAR NOT NULL,
+                    source_account VARCHAR NOT NULL,
                     symbol VARCHAR NOT NULL, exchange VARCHAR NOT NULL,
                     tradingsymbol VARCHAR NOT NULL, instrument_token BIGINT NOT NULL,
                     interval VARCHAR NOT NULL, target_session_date DATE NOT NULL,
@@ -406,12 +502,20 @@ class HistoricalBackfillContractTests(unittest.TestCase):
                 )
             """))
             connection.execute(text("""
+                CREATE TABLE historical_price_snapshot_chunks (
+                    snapshot_id VARCHAR(36) NOT NULL, chunk_id VARCHAR(64) NOT NULL,
+                    ordinal INTEGER NOT NULL, chunk_key VARCHAR NOT NULL,
+                    PRIMARY KEY(snapshot_id, ordinal),
+                    UNIQUE(snapshot_id, chunk_key), UNIQUE(snapshot_id, chunk_id)
+                )
+            """))
+            connection.execute(text("""
                 CREATE TABLE historical_price_bars (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT, dataset_id VARCHAR(64) NOT NULL,
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, chunk_id VARCHAR(64) NOT NULL,
                     observed_at TIMESTAMP NOT NULL, session_date DATE NOT NULL,
                     open NUMERIC NOT NULL, high NUMERIC NOT NULL, low NUMERIC NOT NULL,
                     close NUMERIC NOT NULL, volume NUMERIC NOT NULL, oi NUMERIC,
-                    UNIQUE(dataset_id, observed_at)
+                    UNIQUE(chunk_id, observed_at)
                 )
             """))
 
@@ -435,7 +539,8 @@ class HistoricalBackfillContractTests(unittest.TestCase):
                     "status": "PENDING",
                     "finality_status": "PENDING_FINALITY",
                     "content_hash": acquisition_content_hash(evidence["snapshots"]),
-                    "datasets": evidence["datasets"],
+                    "chunks": evidence["chunks"],
+                    "snapshot_chunks": evidence["snapshot_chunks"],
                     "snapshots": evidence["snapshots"],
                     "bars": evidence["bars"],
                 },
@@ -450,7 +555,7 @@ class HistoricalBackfillContractTests(unittest.TestCase):
             )
             self.assertEqual(
                 connection.execute(
-                    text("SELECT count(*) FROM historical_price_datasets")
+                    text("SELECT count(*) FROM historical_price_chunks")
                 ).scalar_one(),
                 2,
             )
@@ -459,6 +564,12 @@ class HistoricalBackfillContractTests(unittest.TestCase):
                     text("SELECT count(*) FROM historical_price_snapshots")
                 ).scalar_one(),
                 4,
+            )
+            self.assertEqual(
+                connection.execute(
+                    text("SELECT count(*) FROM historical_price_snapshot_chunks")
+                ).scalar_one(),
+                len(evidence["snapshot_chunks"]) * 2,
             )
             self.assertEqual(
                 connection.execute(
@@ -892,7 +1003,7 @@ class HistoricalBackfillContractTests(unittest.TestCase):
         persisted = persist_pending.call_args.kwargs["acquisition"]
         self.assertEqual(persisted["status"], "PENDING")
         self.assertEqual(persisted["finality_status"], "PENDING_FINALITY")
-        self.assertEqual(len(persisted["datasets"]), 2)
+        self.assertEqual(len(persisted["chunks"]), 2)
         self.assertEqual(len(persisted["snapshots"]), 2)
 
     @patch.object(trend_sync, "persist_strict_trend_preparation")

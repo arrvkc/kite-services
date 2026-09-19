@@ -45,10 +45,12 @@ def test_signal_research_db_supports_exact_date_without_changing_cron_default(tm
     assert "strategy_run.historical_acquisition_id IS NOT NULL" in sql
     assert "JOIN historical_trend_outputs trend" in sql
     assert "JOIN historical_price_snapshots snapshot" in sql
+    assert "JOIN historical_price_snapshot_chunks basis_ref" in sql
+    assert "JOIN historical_price_snapshot_chunks observed_ref" in sql
     assert "JOIN historical_price_bars basis" in sql
     assert "JOIN historical_price_bars observed" in sql
-    assert "basis.dataset_id = snapshot.dataset_id" in sql
-    assert "observed.dataset_id = snapshot.dataset_id" in sql
+    assert "basis.chunk_id = basis_ref.chunk_id" in sql
+    assert "observed.chunk_id = observed_ref.chunk_id" in sql
     assert "basis.snapshot_id" not in sql
     assert "FROM trend_history_fo_universe" not in sql
 

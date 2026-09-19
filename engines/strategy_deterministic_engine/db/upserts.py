@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 
 from sqlalchemy import text
@@ -59,28 +60,28 @@ VALUES (
 )
 """)
 
-HISTORICAL_DATASET_INSERT_SQL = text("""
-INSERT INTO historical_price_datasets (
+HISTORICAL_CHUNK_INSERT_SQL = text("""
+INSERT INTO historical_price_chunks (
     id, source, symbol, exchange, tradingsymbol, instrument_token, interval,
-    covered_from, covered_to, bar_count, content_hash
+    chunk_key, covered_from, covered_to, bar_count, content_hash
 )
 VALUES (
     :id, :source, :symbol, :exchange, :tradingsymbol, :instrument_token,
-    :interval, :covered_from, :covered_to, :bar_count, :content_hash
+    :interval, :chunk_key, :covered_from, :covered_to, :bar_count, :content_hash
 )
 ON CONFLICT (id) DO NOTHING
 """)
 
 HISTORICAL_SNAPSHOT_INSERT_SQL = text("""
 INSERT INTO historical_price_snapshots (
-    id, acquisition_id, dataset_id, source_account, symbol, exchange, tradingsymbol,
+    id, acquisition_id, source_account, symbol, exchange, tradingsymbol,
     instrument_token, interval, target_session_date, covered_from, covered_to,
     retrieved_at, bar_count, content_hash, validation_status, finality_source,
     finality_source_key, finality_source_hash, finality_close,
     finality_retrieved_at
 )
 VALUES (
-    :id, :acquisition_id, :dataset_id, :source_account, :symbol, :exchange, :tradingsymbol,
+    :id, :acquisition_id, :source_account, :symbol, :exchange, :tradingsymbol,
     :instrument_token, :interval, :target_session_date, :covered_from, :covered_to,
     :retrieved_at, :bar_count, :content_hash, :validation_status,
     :finality_source, :finality_source_key, :finality_source_hash,
@@ -88,15 +89,24 @@ VALUES (
 )
 """)
 
-HISTORICAL_BAR_INSERT_SQL = text("""
-INSERT INTO historical_price_bars (
-    dataset_id, observed_at, session_date, open, high, low, close, volume, oi
+HISTORICAL_SNAPSHOT_CHUNK_INSERT_SQL = text("""
+INSERT INTO historical_price_snapshot_chunks (
+    snapshot_id, chunk_id, ordinal, chunk_key
 )
 VALUES (
-    :dataset_id, :observed_at, :session_date, :open, :high, :low, :close,
+    :snapshot_id, :chunk_id, :ordinal, :chunk_key
+)
+""")
+
+HISTORICAL_BAR_INSERT_SQL = text("""
+INSERT INTO historical_price_bars (
+    chunk_id, observed_at, session_date, open, high, low, close, volume, oi
+)
+VALUES (
+    :chunk_id, :observed_at, :session_date, :open, :high, :low, :close,
     :volume, :oi
 )
-ON CONFLICT (dataset_id, observed_at) DO NOTHING
+ON CONFLICT (chunk_id, observed_at) DO NOTHING
 """)
 
 HISTORICAL_TREND_OUTPUT_INSERT_SQL = text("""
@@ -111,6 +121,52 @@ VALUES (
     :tradingsymbol, :instrument_token
 )
 """)
+
+
+def historical_snapshot_manifest_hash(references: list[dict]) -> str:
+    manifest = [
+        {
+            "ordinal": item["ordinal"],
+            "chunk_key": item["chunk_key"],
+            "chunk_id": item["chunk_id"],
+        }
+        for item in references
+    ]
+    return hashlib.sha256(
+        json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def validate_historical_chunk_manifests(acquisition: dict) -> None:
+    """Reject incomplete or cross-identity manifests before persistence."""
+    chunks = {item["id"]: item for item in acquisition["chunks"]}
+    snapshots = {item["id"]: item for item in acquisition["snapshots"]}
+    references: dict[str, list[dict]] = {item: [] for item in snapshots}
+    for reference in acquisition["snapshot_chunks"]:
+        snapshot = snapshots.get(reference["snapshot_id"])
+        chunk = chunks.get(reference["chunk_id"])
+        if snapshot is None or chunk is None:
+            raise RuntimeError("Historical snapshot references unknown evidence.")
+        identity = (
+            "symbol",
+            "exchange",
+            "tradingsymbol",
+            "instrument_token",
+            "interval",
+        )
+        if any(snapshot[key] != chunk[key] for key in identity):
+            raise RuntimeError("Historical snapshot references a cross-identity chunk.")
+        if reference["chunk_key"] != chunk["chunk_key"]:
+            raise RuntimeError("Historical snapshot chunk boundary is inconsistent.")
+        references[reference["snapshot_id"]].append(reference)
+    for snapshot_id, snapshot in snapshots.items():
+        ordered = sorted(references[snapshot_id], key=lambda item: item["ordinal"])
+        if [item["ordinal"] for item in ordered] != list(range(len(ordered))):
+            raise RuntimeError("Historical snapshot chunk ordinals are incomplete.")
+        if not ordered:
+            raise RuntimeError("Historical snapshot has no chunk references.")
+        if historical_snapshot_manifest_hash(ordered) != snapshot["content_hash"]:
+            raise RuntimeError("Historical snapshot manifest hash is inconsistent.")
 
 
 CONTRACT_SNAPSHOT_UPSERT_SQL = text("""
@@ -220,6 +276,7 @@ RETURNING id
 
 
 def _persist_historical_evidence(conn, acquisition: dict, batch_size: int) -> None:
+    validate_historical_chunk_manifests(acquisition)
     conn.execute(
         HISTORICAL_ACQUISITION_INSERT_SQL,
         {key: acquisition[key] for key in (
@@ -227,15 +284,20 @@ def _persist_historical_evidence(conn, acquisition: dict, batch_size: int) -> No
             "status", "finality_status", "content_hash",
         )},
     )
-    for start in range(0, len(acquisition["datasets"]), batch_size):
+    for start in range(0, len(acquisition["chunks"]), batch_size):
         conn.execute(
-            HISTORICAL_DATASET_INSERT_SQL,
-            acquisition["datasets"][start:start + batch_size],
+            HISTORICAL_CHUNK_INSERT_SQL,
+            acquisition["chunks"][start:start + batch_size],
         )
     for start in range(0, len(acquisition["snapshots"]), batch_size):
         conn.execute(
             HISTORICAL_SNAPSHOT_INSERT_SQL,
             acquisition["snapshots"][start:start + batch_size],
+        )
+    for start in range(0, len(acquisition["snapshot_chunks"]), batch_size):
+        conn.execute(
+            HISTORICAL_SNAPSHOT_CHUNK_INSERT_SQL,
+            acquisition["snapshot_chunks"][start:start + batch_size],
         )
     for start in range(0, len(acquisition["bars"]), batch_size):
         conn.execute(
