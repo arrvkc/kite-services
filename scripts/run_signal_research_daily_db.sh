@@ -30,28 +30,27 @@ INSERT INTO signal_trade_entries (
     top_n,
     contract_month_selection,
     expiry_date,
-    source_run_date
+    source_run_date,
+    historical_acquisition_id
 )
-WITH base AS (
+WITH strategy_results AS (
     SELECT
-        s.run_date,
-        s.symbol,
-        (
-            SELECT th.close
-            FROM trend_history_fo_universe th
-            WHERE th.symbol = s.symbol
-              AND th.user_id = strategy_run.generated_by_user_id
-              AND th.trade_date <= s.run_date
-            ORDER BY th.trade_date DESC
-            LIMIT 1
-        ) AS entry_price,
-        s.regime_bucket,
-        s.strategy_family,
-        s.final_strategy_strength AS strength,
+        s.*,
         LAG(s.final_strategy_strength) OVER (
             PARTITION BY s.symbol
             ORDER BY s.run_date
-        ) AS previous_strength,
+        ) AS previous_strategy_strength
+    FROM strategy_deterministic_engine_batch_results s
+),
+base AS (
+    SELECT
+        s.run_date,
+        s.symbol,
+        trend.close AS entry_price,
+        s.regime_bucket,
+        s.strategy_family,
+        s.final_strategy_strength AS strength,
+        s.previous_strategy_strength AS previous_strength,
         s.strategy_transition_state AS transition,
         s.include_in_top_n AS top_n,
         s.contract_month_selection,
@@ -61,12 +60,19 @@ WITH base AS (
             WHEN s.contract_month_selection = 'NEXT_MONTH'
                 THEN s.run_date + COALESCE(s.dte_next_month, 10)
             ELSE s.run_date + 10
-        END AS expiry_date
-    FROM strategy_deterministic_engine_batch_results s
+        END AS expiry_date,
+        strategy_run.historical_acquisition_id
+    FROM strategy_results s
     JOIN strategy_deterministic_engine_runs strategy_run
       ON strategy_run.id = s.run_id
      AND strategy_run.run_date = s.run_date
      AND strategy_run.generated_by_user_id IS NOT NULL
+     AND strategy_run.historical_acquisition_id IS NOT NULL
+    JOIN historical_trend_outputs trend
+      ON trend.acquisition_id = strategy_run.historical_acquisition_id
+     AND trend.user_id = strategy_run.generated_by_user_id
+     AND trend.symbol = s.symbol
+     AND trend.trade_date = s.run_date
     WHERE NULLIF(:'recovery_run_date', '') IS NULL
        OR s.run_date = NULLIF(:'recovery_run_date', '')::date
 )
@@ -82,7 +88,8 @@ SELECT
     top_n,
     contract_month_selection,
     expiry_date,
-    run_date
+    run_date,
+    historical_acquisition_id
 FROM base
 WHERE strength >= 60
   AND (previous_strength < 60 OR previous_strength IS NULL)
@@ -97,25 +104,43 @@ INSERT INTO signal_trade_observations (
     return_pct,
     favorable_return_pct,
     adverse_return_pct,
-    target_hit
+    target_hit,
+    historical_acquisition_id
 )
 WITH raw AS (
     SELECT
         e.id AS trade_entry_id,
         e.strategy_family,
-        e.entry_price,
-        th.trade_date,
-        th.close,
-        ROUND(((th.close - e.entry_price) / e.entry_price) * 100, 2) AS return_pct
+        basis.close AS entry_price,
+        observed.session_date AS trade_date,
+        observed.close,
+        ROUND(((observed.close - basis.close) / basis.close) * 100, 2) AS return_pct,
+        current_run.historical_acquisition_id
     FROM signal_trade_entries e
     JOIN strategy_deterministic_engine_runs strategy_run
       ON strategy_run.run_date = e.source_run_date
      AND strategy_run.generated_by_user_id IS NOT NULL
-    JOIN trend_history_fo_universe th
-      ON th.symbol = e.symbol
-     AND th.user_id = strategy_run.generated_by_user_id
-     AND th.trade_date > e.entry_date
-     AND th.trade_date <= e.expiry_date
+    JOIN LATERAL (
+        SELECT candidate.historical_acquisition_id
+        FROM strategy_deterministic_engine_runs candidate
+        WHERE candidate.generated_by_user_id = strategy_run.generated_by_user_id
+          AND candidate.status = 'COMPLETED'
+          AND candidate.historical_acquisition_id IS NOT NULL
+          AND candidate.run_date >= e.entry_date
+        ORDER BY candidate.run_date DESC
+        LIMIT 1
+    ) current_run ON TRUE
+    JOIN historical_price_snapshots snapshot
+      ON snapshot.acquisition_id = current_run.historical_acquisition_id
+     AND snapshot.symbol = e.symbol
+     AND snapshot.interval = 'day'
+    JOIN historical_price_bars basis
+      ON basis.snapshot_id = snapshot.id
+     AND basis.session_date = e.entry_date
+    JOIN historical_price_bars observed
+      ON observed.snapshot_id = snapshot.id
+     AND observed.session_date > e.entry_date
+     AND observed.session_date <= e.expiry_date
     WHERE NULLIF(:'recovery_run_date', '') IS NULL
        OR e.source_run_date = NULLIF(:'recovery_run_date', '')::date
 ),
@@ -148,7 +173,8 @@ scored AS (
             WHEN strategy_family IN ('BEAR_CALL_SPREAD', 'BEAR_PUT_SPREAD')
                  AND return_pct <= -2 THEN true
             ELSE false
-        END AS target_hit
+        END AS target_hit,
+        historical_acquisition_id
     FROM raw
 )
 SELECT
@@ -158,7 +184,8 @@ SELECT
     return_pct,
     favorable_return_pct,
     adverse_return_pct,
-    target_hit
+    target_hit,
+    historical_acquisition_id
 FROM scored
 ON CONFLICT DO NOTHING;
 
@@ -178,10 +205,12 @@ INSERT INTO signal_trade_outcomes (
 WITH latest_market AS (
     SELECT
         strategy_run.run_date,
-        MAX(th.trade_date) AS latest_trade_date
+        MAX(latest_run.run_date) AS latest_trade_date
     FROM strategy_deterministic_engine_runs strategy_run
-    JOIN trend_history_fo_universe th
-      ON th.user_id = strategy_run.generated_by_user_id
+    JOIN strategy_deterministic_engine_runs latest_run
+      ON latest_run.generated_by_user_id = strategy_run.generated_by_user_id
+     AND latest_run.status = 'COMPLETED'
+     AND latest_run.historical_acquisition_id IS NOT NULL
     WHERE strategy_run.generated_by_user_id IS NOT NULL
     GROUP BY strategy_run.run_date
 ),

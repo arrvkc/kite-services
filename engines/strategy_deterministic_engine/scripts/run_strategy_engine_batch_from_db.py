@@ -271,6 +271,12 @@ def main() -> None:
             "input_exclusions": input_verification[
                 "strategy_input_exclusions"
             ],
+            "historical_acquisition_id": input_verification[
+                "historical_acquisition_id"
+            ],
+            "historical_acquisition_hash": input_verification[
+                "historical_acquisition_hash"
+            ],
         }
 
     with engine.begin() as conn:

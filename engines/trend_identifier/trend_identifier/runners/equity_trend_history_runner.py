@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timezone
+from decimal import Decimal, InvalidOperation
+import hashlib
+import json
 from typing import Any, Dict, List
 from zoneinfo import ZoneInfo
 
@@ -25,6 +28,74 @@ class TrendHistoryResult:
     tradingsymbol: str
     instrument_token: int
     history: pd.DataFrame
+    source_window: "CoherentHistoricalWindow"
+
+
+@dataclass(frozen=True)
+class CoherentHistoricalWindow:
+    """Exact Zerodha bars used for every Trend cut point in one symbol run."""
+
+    symbol: str
+    exchange: str
+    tradingsymbol: str
+    instrument_token: int
+    target_session_date: date
+    retrieved_at: datetime
+    finality_status: str
+    daily: pd.DataFrame
+    hourly: pd.DataFrame
+    daily_content_hash: str
+    hourly_content_hash: str
+
+
+class TargetSessionNotFinalized(RuntimeError):
+    """The target daily candle is not yet safe for immutable publication."""
+
+
+def _canonical_decimal(value: object) -> str | None:
+    if value is None or pd.isna(value):
+        return None
+    try:
+        decimal_value = Decimal(str(value))
+    except (InvalidOperation, ValueError) as exc:
+        raise ValueError("Historical evidence contains an invalid number.") from exc
+    if not decimal_value.is_finite():
+        raise ValueError("Historical evidence contains a non-finite number.")
+    if decimal_value == 0:
+        return "0"
+    return format(decimal_value.normalize(), "f")
+
+
+def canonical_bars(frame: pd.DataFrame) -> list[dict]:
+    rows = []
+    for row in frame.to_dict(orient="records"):
+        timestamp = pd.Timestamp(row["timestamp"])
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.tz_localize("UTC")
+        else:
+            timestamp = timestamp.tz_convert("UTC")
+        rows.append(
+            {
+                "timestamp": timestamp.isoformat(),
+                "open": _canonical_decimal(row.get("open")),
+                "high": _canonical_decimal(row.get("high")),
+                "low": _canonical_decimal(row.get("low")),
+                "close": _canonical_decimal(row.get("close")),
+                "volume": _canonical_decimal(row.get("volume")),
+                "oi": _canonical_decimal(row.get("oi")),
+            }
+        )
+    return rows
+
+
+def bars_content_hash(frame: pd.DataFrame) -> str:
+    payload = json.dumps(
+        canonical_bars(frame),
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -107,20 +178,28 @@ class EquityTrendHistoryRunner:
         daily_lookback_days: int = 900,
         hourly_lookback_days: int = 120,
         end_date: date | str | None = None,
+        *,
+        retrieved_at: datetime | None = None,
     ) -> TrendHistoryResult:
         if history_days <= 0:
             raise ValueError("history_days must be positive.")
 
-        # Keep this only for discovering the last N trading-day cut points.
-        # Historical recovery must bound this discovery before selecting the
-        # final N sessions; otherwise today's latest candles contaminate an
-        # earlier run date.
-        target_date = date.fromisoformat(end_date) if isinstance(end_date, str) else end_date
+        # Acquire the complete daily/hourly source once.  Every historical cut
+        # point below is a slice of this exact version, so a run cannot stitch
+        # together different Zerodha historical revision bases.
+        target_date = (
+            date.fromisoformat(end_date) if isinstance(end_date, str) else end_date
+        )
         if target_date is None:
-            raw_bars, _ = self.equity_runner.build_raw_bars_for_symbol(
+            raw_bars, instrument_metadata = self.equity_runner.build_raw_bars_for_symbol(
                 symbol=symbol,
-                daily_lookback_days=30,
+                daily_lookback_days=daily_lookback_days,
                 hourly_lookback_days=hourly_lookback_days,
+            )
+            target_date = (
+                pd.to_datetime(raw_bars["hourly"]["timestamp"], utc=True)
+                .dt.tz_convert("Asia/Kolkata")
+                .dt.date.max()
             )
         else:
             target_end = datetime.combine(
@@ -131,9 +210,13 @@ class EquityTrendHistoryRunner:
             raw_bars, instrument_metadata = self.equity_runner.build_raw_bars_for_symbol_asof(
                 symbol=symbol,
                 asof_time=target_end,
-                daily_lookback_days=30,
+                daily_lookback_days=daily_lookback_days,
                 hourly_lookback_days=hourly_lookback_days,
             )
+
+        retrieved_at = retrieved_at or datetime.now(timezone.utc)
+        if retrieved_at.tzinfo is None:
+            raise ValueError("retrieved_at must be timezone-aware.")
 
         hourly = raw_bars["hourly"].copy()
         hourly["timestamp"] = pd.to_datetime(hourly["timestamp"], utc=True)
@@ -212,6 +295,34 @@ class EquityTrendHistoryRunner:
                     )
                 )
 
+            if len(target_daily.index) != 1:
+                raise TargetSessionNotFinalized(
+                    f"No completed market session found for {symbol.upper()} "
+                    f"on {target_date}: expected one target-session daily candle."
+                )
+
+            retrieved_local = retrieved_at.astimezone(ZoneInfo("Asia/Kolkata"))
+            if retrieved_local.date() == target_date:
+                latest_target_hour = None
+                if not target_hourly.empty:
+                    latest_target_hour = (
+                        target_hourly["timestamp"]
+                        .dt.tz_convert("Asia/Kolkata")
+                        .max()
+                    )
+                if (
+                    retrieved_local.time() < time(16, 0)
+                    or latest_target_hour is None
+                    or latest_target_hour.time() < time(15, 15)
+                ):
+                    raise TargetSessionNotFinalized(
+                        f"{symbol.upper()} target session {target_date} is not finalized."
+                    )
+            elif retrieved_local.date() < target_date:
+                raise TargetSessionNotFinalized(
+                    f"{symbol.upper()} target session {target_date} is in the future."
+                )
+
         if hourly.empty:
             raise RuntimeError(f"No hourly bars found for {symbol}.")
 
@@ -241,19 +352,23 @@ class EquityTrendHistoryRunner:
         last_result: Dict[str, Any] | None = None
 
         for asof_time in selected_cut_points:
-            raw_bars_asof, _ = self.equity_runner.build_raw_bars_for_symbol_asof(
-                symbol=symbol,
-                asof_time=asof_time,
-                daily_lookback_days=daily_lookback_days,
-                hourly_lookback_days=hourly_lookback_days,
-            )
+            raw_bars_asof = {
+                "daily": raw_bars["daily"].loc[
+                    pd.to_datetime(raw_bars["daily"]["timestamp"], utc=True)
+                    <= pd.Timestamp(asof_time)
+                ].reset_index(drop=True),
+                "hourly": raw_bars["hourly"].loc[
+                    pd.to_datetime(raw_bars["hourly"]["timestamp"], utc=True)
+                    <= pd.Timestamp(asof_time)
+                ].reset_index(drop=True),
+            }
             daily_close = raw_bars_asof["daily"].iloc[-1]["close"]
 
-            result = self.equity_runner.run_for_symbol_asof(
+            result = self.equity_runner.evaluate_raw_bars_asof(
                 symbol=symbol,
                 asof_time=asof_time,
-                daily_lookback_days=daily_lookback_days,
-                hourly_lookback_days=hourly_lookback_days,
+                raw_bars=raw_bars,
+                instrument_metadata=instrument_metadata,
             )
             last_result = result
             payload = result["payload"]
@@ -294,4 +409,17 @@ class EquityTrendHistoryRunner:
             tradingsymbol=last_result["tradingsymbol"],
             instrument_token=last_result["instrument_token"],
             history=history_df,
+            source_window=CoherentHistoricalWindow(
+                symbol=symbol.upper(),
+                exchange=last_result["exchange"],
+                tradingsymbol=last_result["tradingsymbol"],
+                instrument_token=last_result["instrument_token"],
+                target_session_date=target_date,
+                retrieved_at=retrieved_at,
+                finality_status="FINALIZED",
+                daily=raw_bars["daily"].copy(),
+                hourly=raw_bars["hourly"].copy(),
+                daily_content_hash=bars_content_hash(raw_bars["daily"]),
+                hourly_content_hash=bars_content_hash(raw_bars["hourly"]),
+            ),
         )

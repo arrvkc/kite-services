@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import math
 from datetime import date
 from typing import Any
+import uuid
 
 import pandas as pd
 from kiteconnect import KiteConnect
@@ -17,6 +20,7 @@ from engines.trend_identifier.trend_identifier.runners.equity_trend_history_runn
     EquityTrendHistoryRunner,
     NoTradingActivityCandidate,
     TargetDateHistoryUnavailableCandidate,
+    canonical_bars,
 )
 from engines.strategy_deterministic_engine.db.postgres import get_engine
 from engines.strategy_deterministic_engine.db.upserts import (
@@ -217,6 +221,90 @@ def build_symbol_rows(args, result) -> list[dict]:
     return symbol_rows
 
 
+def build_acquisition_evidence(acquisition_id: str, args, result) -> dict:
+    """Serialize the exact coherent windows and derived Trend rows for storage."""
+    window = result.source_window
+    snapshots = []
+    bars = []
+    daily_snapshot_id = None
+    for interval, frame, content_hash in (
+        ("day", window.daily, window.daily_content_hash),
+        ("60minute", window.hourly, window.hourly_content_hash),
+    ):
+        snapshot_id = str(uuid.uuid4())
+        if interval == "day":
+            daily_snapshot_id = snapshot_id
+        canonical = canonical_bars(frame)
+        if not canonical:
+            raise RuntimeError(f"{result.symbol} {interval} acquisition is empty.")
+        snapshots.append(
+            {
+                "id": snapshot_id,
+                "acquisition_id": acquisition_id,
+                "source_account": args.user_id,
+                "symbol": result.symbol,
+                "exchange": result.exchange,
+                "tradingsymbol": result.tradingsymbol,
+                "instrument_token": result.instrument_token,
+                "interval": interval,
+                "target_session_date": window.target_session_date,
+                "covered_from": pd.Timestamp(frame["timestamp"].min()).to_pydatetime(),
+                "covered_to": pd.Timestamp(frame["timestamp"].max()).to_pydatetime(),
+                "retrieved_at": window.retrieved_at,
+                "bar_count": len(canonical),
+                "content_hash": content_hash,
+                "validation_status": window.finality_status,
+            }
+        )
+        for item in canonical:
+            observed_at = pd.Timestamp(item["timestamp"])
+            bars.append(
+                {
+                    "snapshot_id": snapshot_id,
+                    "observed_at": observed_at.to_pydatetime(),
+                    "session_date": observed_at.tz_convert("Asia/Kolkata").date(),
+                    "open": item["open"],
+                    "high": item["high"],
+                    "low": item["low"],
+                    "close": item["close"],
+                    "volume": item["volume"],
+                    "oi": item["oi"],
+                }
+            )
+    if daily_snapshot_id is None:
+        raise RuntimeError("A daily historical snapshot is required.")
+    trend_outputs = []
+    for row in build_symbol_rows(args, result):
+        trend_outputs.append(
+            {
+                **row,
+                "acquisition_id": acquisition_id,
+                "daily_snapshot_id": daily_snapshot_id,
+            }
+        )
+    return {
+        "snapshots": snapshots,
+        "bars": bars,
+        "trend_outputs": trend_outputs,
+    }
+
+
+def acquisition_content_hash(snapshots: list[dict]) -> str:
+    members = [
+        {
+            "symbol": item["symbol"],
+            "interval": item["interval"],
+            "content_hash": item["content_hash"],
+        }
+        for item in sorted(
+            snapshots, key=lambda item: (item["symbol"], item["interval"])
+        )
+    ]
+    return hashlib.sha256(
+        json.dumps(members, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
 def main() -> None:
     args = build_argument_parser().parse_args()
     end_date = date.fromisoformat(args.end_date) if args.end_date else None
@@ -242,6 +330,10 @@ def main() -> None:
     ] = []
     strict_rows: list[dict] = []
     prepared_symbols: set[str] = set()
+    acquisition_id = str(uuid.uuid4())
+    acquisition_snapshots: list[dict] = []
+    acquisition_bars: list[dict] = []
+    immutable_trend_outputs: list[dict] = []
 
     for index, symbol in enumerate(symbols, start=1):
         try:
@@ -253,6 +345,12 @@ def main() -> None:
 
             symbol_rows = build_symbol_rows(args, result)
             prepared_symbols.add(symbol)
+
+            if args.strict and not args.dry_run:
+                evidence = build_acquisition_evidence(acquisition_id, args, result)
+                acquisition_snapshots.extend(evidence["snapshots"])
+                acquisition_bars.extend(evidence["bars"])
+                immutable_trend_outputs.extend(evidence["trend_outputs"])
 
             if args.dry_run or args.strict:
                 total_rows += len(symbol_rows)
@@ -382,6 +480,22 @@ def main() -> None:
                 allow_unverified_completed_restart=(
                     args.restart_unverified_completed_run
                 ),
+                acquisition={
+                    "id": acquisition_id,
+                    "source_account": args.user_id,
+                    "target_session_date": manifest["run_date"],
+                    "retrieved_at": max(
+                        item["retrieved_at"] for item in acquisition_snapshots
+                    ),
+                    "status": "COMPLETE",
+                    "finality_status": "FINALIZED",
+                    "content_hash": acquisition_content_hash(
+                        acquisition_snapshots
+                    ),
+                    "snapshots": acquisition_snapshots,
+                    "bars": acquisition_bars,
+                    "trend_outputs": immutable_trend_outputs,
+                },
             )
         print(f"UPSERTED trend_history_fo_universe rows={written}")
         print(

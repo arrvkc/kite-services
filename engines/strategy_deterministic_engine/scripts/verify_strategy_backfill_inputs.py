@@ -175,10 +175,18 @@ def validate_target_date_unavailable_exclusion(
 def load_input_preparation_manifest(connection, run_date: date, user_id: str) -> dict:
     row = connection.execute(
         text(
-            "SELECT status, generated_by_user_id, requested_symbols_count, prepared_symbols_count, "
-            "       evaluated_symbols_count, input_exclusion_count, "
-            "       input_exclusions_json "
-            "FROM strategy_deterministic_engine_runs WHERE run_date = :run_date"
+            "SELECT run.status, run.generated_by_user_id, run.requested_symbols_count, run.prepared_symbols_count, "
+            "       run.evaluated_symbols_count, run.input_exclusion_count, "
+            "       run.input_exclusions_json, run.historical_acquisition_id, "
+            "       acquisition.content_hash AS historical_acquisition_hash, "
+            "       acquisition.source_account AS acquisition_source_account, "
+            "       acquisition.target_session_date AS acquisition_target_session_date, "
+            "       acquisition.status AS acquisition_status, "
+            "       acquisition.finality_status AS acquisition_finality_status "
+            "FROM strategy_deterministic_engine_runs AS run "
+            "LEFT JOIN historical_price_acquisitions AS acquisition "
+            "  ON acquisition.id = run.historical_acquisition_id "
+            "WHERE run.run_date = :run_date"
         ),
         {"run_date": run_date},
     ).mappings().one_or_none()
@@ -189,6 +197,17 @@ def load_input_preparation_manifest(connection, run_date: date, user_id: str) ->
     if str(row["generated_by_user_id"] or "").strip().upper() != user_id:
         raise RuntimeError(
             "Exact-date Strategy input preparation belongs to another account."
+        )
+    if (
+        row["historical_acquisition_id"] is None
+        or row["acquisition_source_account"] != user_id
+        or row["acquisition_target_session_date"] != run_date
+        or row["acquisition_status"] != "COMPLETE"
+        or row["acquisition_finality_status"] != "FINALIZED"
+        or not row["historical_acquisition_hash"]
+    ):
+        raise RuntimeError(
+            "Exact-date Strategy historical acquisition is missing or not finalized."
         )
     try:
         exclusions = json.loads(row["input_exclusions_json"] or "[]")
@@ -242,6 +261,8 @@ def load_input_preparation_manifest(connection, run_date: date, user_id: str) ->
         "prepared_symbols_count": int(row["prepared_symbols_count"]),
         "exclusions": preparation_exclusions,
         "stored_strategy_input_exclusions": strategy_input_exclusions,
+        "historical_acquisition_id": str(row["historical_acquisition_id"]),
+        "historical_acquisition_hash": str(row["historical_acquisition_hash"]),
     }
 
 
@@ -354,6 +375,8 @@ def verify_inputs(
         "strategy_input_count": len(strategy_inputs),
         "strategy_input_exclusion_count": len(all_exclusions),
         "strategy_input_exclusions": all_exclusions,
+        "historical_acquisition_id": preparation["historical_acquisition_id"],
+        "historical_acquisition_hash": preparation["historical_acquisition_hash"],
         "no_trading_activity_count": sum(
             item["reason"] == NO_TRADING_ACTIVITY
             for item in preparation["exclusions"]

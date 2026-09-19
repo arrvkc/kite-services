@@ -39,9 +39,15 @@ def test_signal_research_db_supports_exact_date_without_changing_cron_default(tm
     assert sql.count("e.source_run_date = NULLIF(:'recovery_run_date', '')::date") == 2
     assert "s.run_date = NULLIF(:'recovery_run_date', '')::date" in sql
     assert "JOIN strategy_deterministic_engine_runs strategy_run" in sql
-    assert "th.user_id = strategy_run.generated_by_user_id" in sql
+    assert "trend.user_id = strategy_run.generated_by_user_id" in sql
     assert "strategy_run.generated_by_user_id IS NOT NULL" in sql
     assert "lm.run_date = e.source_run_date" in sql
+    assert "strategy_run.historical_acquisition_id IS NOT NULL" in sql
+    assert "JOIN historical_trend_outputs trend" in sql
+    assert "JOIN historical_price_snapshots snapshot" in sql
+    assert "JOIN historical_price_bars basis" in sql
+    assert "JOIN historical_price_bars observed" in sql
+    assert "FROM trend_history_fo_universe" not in sql
 
     default = subprocess.run(
         ["bash", str(SCRIPT)],
@@ -93,6 +99,8 @@ def test_signal_research_uses_each_strategy_runs_authoritative_account(tmp_path)
 
     assert result.returncode == 0
     sql = captured_sql.read_text()
-    assert sql.count("th.user_id = strategy_run.generated_by_user_id") == 3
+    assert "trend.user_id = strategy_run.generated_by_user_id" in sql
+    assert sql.count("current_run.historical_acquisition_id") >= 2
+    assert "FROM trend_history_fo_universe" not in sql
     assert "OMK569" not in sql
     assert "XJ1877" not in sql

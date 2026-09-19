@@ -313,6 +313,49 @@ class EquityTrendRunner:
             "payload": payload,
         }
 
+    def evaluate_raw_bars_asof(
+        self,
+        *,
+        symbol: str,
+        asof_time: Any,
+        raw_bars: Dict[str, pd.DataFrame],
+        instrument_metadata: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Evaluate one cut point from an already acquired coherent window.
+
+        Callers that calculate several historical cut points must use this
+        boundary instead of fetching overlapping windows independently.  The
+        engine receives the same shapes as ``run_for_symbol_asof``; only the
+        data-acquisition lifecycle differs.
+        """
+        asof_timestamp = pd.Timestamp(self._normalize_asof_time(asof_time))
+        sliced: Dict[str, pd.DataFrame] = {}
+        for interval in ("daily", "hourly"):
+            frame = raw_bars[interval]
+            sliced[interval] = frame.loc[
+                pd.to_datetime(frame["timestamp"], utc=True) <= asof_timestamp
+            ].reset_index(drop=True)
+            if sliced[interval].empty:
+                raise RuntimeError(f"No {interval} bars available for {symbol} at {asof_time}.")
+        sliced["weekly"] = self.resample_weekly_from_daily(sliced["daily"])
+        if sliced["weekly"].empty:
+            raise RuntimeError(f"No weekly bars available for {symbol} at {asof_time}.")
+
+        payload = evaluate_trend(
+            instrument=symbol.upper(),
+            asof_time=asof_time,
+            calendar=instrument_metadata["resolved_exchange"],
+            raw_bars=sliced,
+            instrument_metadata=instrument_metadata,
+        )
+        return {
+            "symbol": symbol.upper(),
+            "exchange": instrument_metadata["resolved_exchange"],
+            "tradingsymbol": instrument_metadata["resolved_tradingsymbol"],
+            "instrument_token": instrument_metadata["instrument_token"],
+            "payload": payload,
+        }
+
     def run_for_symbol(
         self,
         symbol: str,

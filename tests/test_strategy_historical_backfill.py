@@ -36,6 +36,8 @@ from engines.strategy_deterministic_engine.scripts.sync_contract_snapshot_fo_uni
     build_argument_parser as contract_parser,
 )
 from engines.strategy_deterministic_engine.scripts.sync_trend_history_fo_universe_to_db import (
+    acquisition_content_hash,
+    build_acquisition_evidence,
     build_strict_preparation_manifest,
     build_argument_parser as trend_parser,
     exception_detail,
@@ -48,11 +50,14 @@ from engines.strategy_deterministic_engine.scripts.verify_strategy_backfill_inpu
     validate_target_date_unavailable_exclusion,
 )
 from engines.trend_identifier.trend_identifier.runners.equity_trend_history_runner import (
+    CoherentHistoricalWindow,
     EquityTrendHistoryRunner,
     NoTradingActivityCandidate,
     NoTradingActivityEvidence,
     TargetDateHistoryUnavailableCandidate,
     TargetDateHistoryUnavailableEvidence,
+    TargetSessionNotFinalized,
+    bars_content_hash,
 )
 
 
@@ -91,6 +96,82 @@ def contract_frame() -> pd.DataFrame:
     )
 
 
+def coherent_source_window(
+    symbol: str = "ABC", target_date: date = date(2026, 9, 8)
+) -> CoherentHistoricalWindow:
+    daily = pd.DataFrame(
+        [{
+            "timestamp": pd.Timestamp(target_date, tz="Asia/Kolkata"),
+            "open": 99.0,
+            "high": 101.0,
+            "low": 98.0,
+            "close": 100.0,
+            "volume": 1000,
+        }]
+    )
+    hourly = pd.DataFrame(
+        [{
+            "timestamp": pd.Timestamp(
+                f"{target_date.isoformat()}T15:15:00+05:30"
+            ),
+            "open": 99.0,
+            "high": 101.0,
+            "low": 98.0,
+            "close": 100.0,
+            "volume": 1000,
+        }]
+    )
+    return CoherentHistoricalWindow(
+        symbol=symbol,
+        exchange="NSE",
+        tradingsymbol=symbol,
+        instrument_token=1,
+        target_session_date=target_date,
+        retrieved_at=datetime(2026, 9, 9, tzinfo=timezone.utc),
+        finality_status="FINALIZED",
+        daily=daily,
+        hourly=hourly,
+        daily_content_hash=bars_content_hash(daily),
+        hourly_content_hash=bars_content_hash(hourly),
+    )
+
+
+def strict_result(symbol: str = "ABC") -> SimpleNamespace:
+    return SimpleNamespace(
+        symbol=symbol,
+        exchange="NSE",
+        tradingsymbol=symbol,
+        instrument_token=1,
+        history=pd.DataFrame(
+            [{
+                "date": "2026-09-08",
+                "close": 100,
+                "label": "UP",
+                "confidence": 0.8,
+                "aggregate_score": 0.5,
+                "internal_state": "CLASSIFIABLE",
+            }]
+        ),
+        source_window=coherent_source_window(symbol),
+    )
+
+
+def acquisition_fixture(acquisition_id: str = "acquisition-1") -> dict:
+    source_window = coherent_source_window()
+    return {
+        "id": acquisition_id,
+        "source_account": "OMK569",
+        "target_session_date": source_window.target_session_date,
+        "retrieved_at": source_window.retrieved_at,
+        "status": "COMPLETE",
+        "finality_status": "FINALIZED",
+        "content_hash": "a" * 64,
+        "snapshots": [],
+        "bars": [],
+        "trend_outputs": [],
+    }
+
+
 class CapturingDbAdapter(TrendIdentifierDbAdapter):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -98,10 +179,145 @@ class CapturingDbAdapter(TrendIdentifierDbAdapter):
 
     def _fetch_dataframe(self, sql, params):
         self.sql.append(sql)
-        return trend_frame() if "trend_history_fo_universe" in sql else contract_frame()
+        return (
+            trend_frame()
+            if "trend_history_fo_universe" in sql
+            or "historical_trend_outputs" in sql
+            else contract_frame()
+        )
+
+    def _load_acquisition_id(self):
+        return "acquisition-1" if self.require_exact_contract_snapshot else None
 
 
 class HistoricalBackfillContractTests(unittest.TestCase):
+    def _coherent_history_result(self, symbol, closes, *, retrieved_at=None):
+        runner = EquityTrendHistoryRunner.__new__(EquityTrendHistoryRunner)
+        runner.exchange = "NSE"
+        equity = MagicMock()
+        runner.equity_runner = equity
+        dates = pd.date_range("2026-05-18", periods=len(closes), freq="B")
+        daily = pd.DataFrame(
+            {
+                "timestamp": pd.to_datetime(dates).tz_localize("Asia/Kolkata"),
+                "open": closes,
+                "high": [value + 2 for value in closes],
+                "low": [value - 2 for value in closes],
+                "close": closes,
+                "volume": [1000] * len(closes),
+            }
+        )
+        hourly = pd.DataFrame(
+            {
+                "timestamp": [
+                    pd.Timestamp(day.date(), tz="Asia/Kolkata")
+                    + pd.Timedelta(hours=15, minutes=15)
+                    for day in dates
+                ],
+                "open": closes,
+                "high": [value + 2 for value in closes],
+                "low": [value - 2 for value in closes],
+                "close": closes,
+                "volume": [1000] * len(closes),
+            }
+        )
+        equity.build_raw_bars_for_symbol_asof.return_value = (
+            {"daily": daily, "hourly": hourly},
+            {
+                "resolved_exchange": "NSE",
+                "resolved_tradingsymbol": symbol,
+                "instrument_token": 123,
+            },
+        )
+        equity.evaluate_raw_bars_asof.return_value = {
+            "symbol": symbol,
+            "exchange": "NSE",
+            "tradingsymbol": symbol,
+            "instrument_token": 123,
+            "payload": {
+                "label": "UP",
+                "confidence": 0.8,
+                "aggregate_score": 0.5,
+                "internal_state": "TRENDING",
+            },
+        }
+        result = runner.build_history_for_symbol(
+            symbol,
+            history_days=len(closes),
+            end_date=dates[-1].date(),
+            retrieved_at=retrieved_at
+            or datetime(2026, 6, 30, tzinfo=timezone.utc),
+        )
+        return result, equity
+
+    def test_adjusted_bonus_examples_remain_one_unmodified_coherent_window(self):
+        examples = {
+            "LICI": [401.20, 398.90, 402.10, 399.80, 398.10],
+            "TRENT": [2798.40, 2812.10, 2801.50, 2820.20, 2816.00],
+        }
+        for symbol, closes in examples.items():
+            with self.subTest(symbol=symbol):
+                result, equity = self._coherent_history_result(symbol, closes)
+                self.assertEqual(result.history["close"].tolist(), closes)
+                self.assertLess(
+                    max(abs(b / a - 1) for a, b in zip(closes, closes[1:])),
+                    0.05,
+                )
+                self.assertEqual(
+                    equity.build_raw_bars_for_symbol_asof.call_count,
+                    1,
+                )
+                self.assertEqual(
+                    equity.evaluate_raw_bars_asof.call_count,
+                    len(closes),
+                )
+
+    def test_later_source_revision_has_new_content_hash_without_mutating_first(self):
+        first, _ = self._coherent_history_result(
+            "NORMAL", [100.0, 101.0, 102.0]
+        )
+        revised, _ = self._coherent_history_result(
+            "NORMAL", [100.0, 101.0, 102.25]
+        )
+        first_hash = first.source_window.daily_content_hash
+        self.assertNotEqual(first_hash, revised.source_window.daily_content_hash)
+        self.assertEqual(first.source_window.daily.iloc[-1]["close"], 102.0)
+        first_evidence = build_acquisition_evidence(
+            "acquisition-1", SimpleNamespace(user_id="XJ1877"), first
+        )
+        revised_evidence = build_acquisition_evidence(
+            "acquisition-2", SimpleNamespace(user_id="XJ1877"), revised
+        )
+        self.assertNotEqual(
+            acquisition_content_hash(first_evidence["snapshots"]),
+            acquisition_content_hash(revised_evidence["snapshots"]),
+        )
+        self.assertTrue(all(
+            item["acquisition_id"] == "acquisition-1"
+            for item in first_evidence["snapshots"]
+        ))
+        self.assertTrue(all(
+            item["acquisition_id"] == "acquisition-2"
+            for item in revised_evidence["snapshots"]
+        ))
+
+    def test_same_day_target_requires_completed_session_evidence(self):
+        target = date(2026, 5, 22)
+        with self.assertRaisesRegex(TargetSessionNotFinalized, "not finalized"):
+            self._coherent_history_result(
+                "ABC",
+                [100.0, 101.0, 102.0, 103.0, 104.0],
+                retrieved_at=datetime(
+                    2026, 5, 22, 9, 59, tzinfo=timezone.utc
+                ),
+            )
+        result, _ = self._coherent_history_result(
+            "ABC",
+            [100.0, 101.0, 102.0, 103.0, 104.0],
+            retrieved_at=datetime(2026, 5, 22, 10, 31, tzinfo=timezone.utc),
+        )
+        self.assertEqual(result.source_window.finality_status, "FINALIZED")
+
     def test_niftyfpi_missing_target_source_is_governed_exclusion_candidate(self):
         kite = MagicMock()
 
@@ -164,6 +380,11 @@ class HistoricalBackfillContractTests(unittest.TestCase):
         self.assertIn("2026-08-26", evidence.latest_intraday_timestamp)
 
         self.assertTrue(kite.historical_data.called)
+        self.assertEqual(kite.historical_data.call_count, 2)
+        self.assertEqual(
+            {call.kwargs["interval"] for call in kite.historical_data.call_args_list},
+            {"day", "60minute"},
+        )
         self.assertTrue(
             all(
                 call.kwargs["instrument_token"] == 9200130
@@ -360,24 +581,7 @@ class HistoricalBackfillContractTests(unittest.TestCase):
             "ABC",
             "NIFTYFPI",
         ]
-        valid_result = SimpleNamespace(
-            symbol="ABC",
-            exchange="NSE",
-            tradingsymbol="ABC",
-            instrument_token=1,
-            history=pd.DataFrame(
-                [
-                    {
-                        "date": "2026-09-08",
-                        "close": 100,
-                        "label": "UP",
-                        "confidence": 0.8,
-                        "aggregate_score": 0.5,
-                        "internal_state": "CLASSIFIABLE",
-                    }
-                ]
-            ),
-        )
+        valid_result = strict_result()
         unavailable = TargetDateHistoryUnavailableCandidate(
             TargetDateHistoryUnavailableEvidence(
                 symbol="NIFTYFPI",
@@ -462,24 +666,7 @@ class HistoricalBackfillContractTests(unittest.TestCase):
         persist_preparation,
     ):
         adapter_cls.return_value.get_fo_universe_symbols.return_value = ["ABC"]
-        runner_cls.return_value.build_history_for_symbol.return_value = SimpleNamespace(
-            symbol="ABC",
-            exchange="NSE",
-            tradingsymbol="ABC",
-            instrument_token=1,
-            history=pd.DataFrame(
-                [
-                    {
-                        "date": "2026-09-08",
-                        "close": 100,
-                        "label": "UP",
-                        "confidence": 0.8,
-                        "aggregate_score": 0.5,
-                        "internal_state": "CLASSIFIABLE",
-                    }
-                ]
-            ),
-        )
+        runner_cls.return_value.build_history_for_symbol.return_value = strict_result()
         persist_preparation.side_effect = RuntimeError("database unavailable")
         with patch.object(
             sys,
@@ -505,12 +692,28 @@ class HistoricalBackfillContractTests(unittest.TestCase):
                 )
             }
         )
-        daily = pd.DataFrame({"close": [100.0]})
+        daily = pd.DataFrame(
+            {
+                "timestamp": pd.to_datetime(
+                    ["2026-08-19T00:00:00+05:30", "2026-08-20T00:00:00+05:30"],
+                    utc=True,
+                ),
+                "open": [99.0, 100.0],
+                "high": [101.0, 102.0],
+                "low": [98.0, 99.0],
+                "close": [100.0, 101.0],
+                "volume": [100, 110],
+            }
+        )
         equity.build_raw_bars_for_symbol_asof.return_value = (
             {"hourly": hourly, "daily": daily},
-            {},
+            {
+                "resolved_exchange": "NSE",
+                "resolved_tradingsymbol": "ABC",
+                "instrument_token": 1,
+            },
         )
-        equity.run_for_symbol_asof.return_value = {
+        equity.evaluate_raw_bars_asof.return_value = {
             "symbol": "ABC",
             "exchange": "NSE",
             "tradingsymbol": "ABC",
@@ -547,9 +750,24 @@ class HistoricalBackfillContractTests(unittest.TestCase):
                         )
                     }
                 ),
-                "daily": pd.DataFrame({"close": [100.0]}),
+                "daily": pd.DataFrame(
+                    {
+                        "timestamp": pd.to_datetime(
+                            ["2026-08-21T00:00:00+05:30"], utc=True
+                        ),
+                        "open": [99.0],
+                        "high": [101.0],
+                        "low": [98.0],
+                        "close": [100.0],
+                        "volume": [100],
+                    }
+                ),
             },
-            {},
+            {
+                "resolved_exchange": "NSE",
+                "resolved_tradingsymbol": "ABC",
+                "instrument_token": 1,
+            },
         )
         with self.assertRaisesRegex(RuntimeError, "No completed market session"):
             runner.build_history_for_symbol(
@@ -773,7 +991,7 @@ class HistoricalBackfillContractTests(unittest.TestCase):
 
     def test_strict_preparation_persists_rows_and_manifest_atomically(self):
         connection = MagicMock()
-        connection.execute.side_effect = [MagicMock(), MagicMock(fetchone=lambda: (7,))]
+        connection.execute.return_value.fetchone.return_value = (7,)
         transaction = MagicMock()
         transaction.__enter__.return_value = connection
         engine = MagicMock()
@@ -806,11 +1024,12 @@ class HistoricalBackfillContractTests(unittest.TestCase):
             requested_symbols_count=2,
             prepared_symbols_count=1,
             exclusions=[exclusion],
+            acquisition=acquisition_fixture(),
         )
 
         self.assertEqual(written, 1)
-        self.assertEqual(connection.execute.call_count, 2)
-        manifest_params = connection.execute.call_args_list[1].args[1]
+        self.assertEqual(connection.execute.call_count, 3)
+        manifest_params = connection.execute.call_args_list[2].args[1]
         self.assertEqual(manifest_params["requested_symbols_count"], 2)
         self.assertEqual(manifest_params["prepared_symbols_count"], 1)
         self.assertIn("NO_TRADING_ACTIVITY", manifest_params["input_exclusions_json"])
@@ -825,7 +1044,7 @@ class HistoricalBackfillContractTests(unittest.TestCase):
         self.assertIn("input_exclusions_json IS NULL", sql)
 
         connection = MagicMock()
-        connection.execute.side_effect = [MagicMock(fetchone=lambda: (87,))]
+        connection.execute.return_value.fetchone.return_value = (87,)
         transaction = MagicMock()
         transaction.__enter__.return_value = connection
         engine = MagicMock()
@@ -838,9 +1057,10 @@ class HistoricalBackfillContractTests(unittest.TestCase):
             requested_symbols_count=0,
             prepared_symbols_count=0,
             exclusions=[],
+            acquisition=acquisition_fixture(),
             allow_unverified_completed_restart=True,
         )
-        params = connection.execute.call_args_list[0].args[1]
+        params = connection.execute.call_args_list[1].args[1]
         self.assertTrue(params["allow_unverified_completed_restart"])
 
     def test_undeclared_missing_prepared_symbol_is_rejected(self):

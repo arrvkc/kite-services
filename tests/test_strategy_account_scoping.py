@@ -44,13 +44,42 @@ def _engine():
                 run_date DATE PRIMARY KEY, status TEXT NOT NULL,
                 generated_by_user_id TEXT, requested_symbols_count INTEGER,
                 prepared_symbols_count INTEGER, evaluated_symbols_count INTEGER,
-                input_exclusion_count INTEGER, input_exclusions_json TEXT
+                input_exclusion_count INTEGER, input_exclusions_json TEXT,
+                historical_acquisition_id TEXT
+            )
+        """))
+        connection.execute(text("""
+            CREATE TABLE historical_price_acquisitions (
+                id TEXT PRIMARY KEY, source_account TEXT NOT NULL,
+                target_session_date DATE NOT NULL, content_hash TEXT NOT NULL,
+                status TEXT NOT NULL, finality_status TEXT NOT NULL
+            )
+        """))
+        connection.execute(text("""
+            CREATE TABLE historical_trend_outputs (
+                acquisition_id TEXT NOT NULL, user_id TEXT NOT NULL,
+                symbol TEXT NOT NULL, trade_date DATE NOT NULL,
+                close NUMERIC, label TEXT, confidence NUMERIC,
+                aggregate_score NUMERIC, internal_state TEXT, exchange TEXT,
+                tradingsymbol TEXT, instrument_token INTEGER
             )
         """))
     return engine
 
 
 def _seed_account(connection, user_id: str, days=SESSION_DAYS, close_base=100):
+    acquisition_id = f"acquisition-{user_id}"
+    connection.execute(
+        text("""
+            INSERT INTO historical_price_acquisitions VALUES
+            (:id, :user_id, '2026-08-20', :content_hash, 'COMPLETE', 'FINALIZED')
+        """),
+        {
+            "id": acquisition_id,
+            "user_id": user_id,
+            "content_hash": user_id.lower().ljust(64, "0")[:64],
+        },
+    )
     for day in days:
         connection.execute(
             text("""
@@ -59,6 +88,19 @@ def _seed_account(connection, user_id: str, days=SESSION_DAYS, close_base=100):
                  0.5, 'TRENDING', 'NSE', 'ABC', 1)
             """),
             {
+                "user_id": user_id,
+                "trade_date": f"2026-08-{day:02d}",
+                "close": close_base + day,
+            },
+        )
+        connection.execute(
+            text("""
+                INSERT INTO historical_trend_outputs VALUES
+                (:acquisition_id, :user_id, 'ABC', :trade_date, :close,
+                 'UP', 0.8, 0.5, 'TRENDING', 'NSE', 'ABC', 1)
+            """),
+            {
+                "acquisition_id": acquisition_id,
                 "user_id": user_id,
                 "trade_date": f"2026-08-{day:02d}",
                 "close": close_base + day,
@@ -78,9 +120,10 @@ def _seed_run(connection, user_id: str):
     connection.execute(
         text("""
             INSERT INTO strategy_deterministic_engine_runs VALUES
-            ('2026-08-20', 'INPUTS_PREPARED', :user_id, 1, 1, NULL, 0, '[]')
+            ('2026-08-20', 'INPUTS_PREPARED', :user_id, 1, 1, NULL, 0, '[]',
+             :acquisition_id)
         """),
-        {"user_id": user_id},
+        {"user_id": user_id, "acquisition_id": f"acquisition-{user_id}"},
     )
 
 

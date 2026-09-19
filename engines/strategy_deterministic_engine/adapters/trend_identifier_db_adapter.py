@@ -27,6 +27,43 @@ class TrendIdentifierDbAdapter:
         self.history_days = history_days
         self.require_exact_contract_snapshot = require_exact_contract_snapshot
 
+    def _load_acquisition_id(self) -> str | None:
+        with self.engine.connect() as conn:
+            row = conn.execute(
+                text(
+                    """
+                    SELECT run.historical_acquisition_id
+                    FROM strategy_deterministic_engine_runs AS run
+                    LEFT JOIN historical_price_acquisitions AS acquisition
+                      ON acquisition.id = run.historical_acquisition_id
+                    WHERE run.run_date = :run_date
+                      AND run.generated_by_user_id = :user_id
+                      AND (
+                        run.historical_acquisition_id IS NULL
+                        OR (
+                          acquisition.source_account = :user_id
+                          AND acquisition.target_session_date = :run_date
+                          AND acquisition.status = 'COMPLETE'
+                          AND acquisition.finality_status = 'FINALIZED'
+                        )
+                      )
+                    """
+                ),
+                {"run_date": self.run_date, "user_id": self.user_id},
+            ).mappings().one_or_none()
+        if row is None:
+            if self.require_exact_contract_snapshot:
+                raise RuntimeError(
+                    "The Strategy run has no valid finalized historical acquisition."
+                )
+            return None
+        acquisition_id = row["historical_acquisition_id"]
+        if self.require_exact_contract_snapshot and acquisition_id is None:
+            raise RuntimeError(
+                "Exact-date Strategy requires immutable historical acquisition lineage."
+            )
+        return acquisition_id
+
     def _fetch_dataframe(self, sql: str, params: dict) -> pd.DataFrame:
         with self.engine.connect() as conn:
             result = conn.execute(text(sql), params)
@@ -36,12 +73,14 @@ class TrendIdentifierDbAdapter:
 
     def load_source_frames(self) -> tuple[pd.DataFrame, pd.DataFrame]:
         """Load Trend and contract evidence for one authoritative account."""
+        acquisition_id = self._load_acquisition_id()
         if self.require_exact_contract_snapshot:
             trend_sql = """
                 WITH target_symbols AS (
                     SELECT DISTINCT symbol
-                    FROM trend_history_fo_universe
-                    WHERE user_id = :user_id
+                    FROM historical_trend_outputs
+                    WHERE acquisition_id = :acquisition_id
+                      AND user_id = :user_id
                       AND trade_date = :run_date
                 ), ranked_history AS (
                     SELECT
@@ -59,9 +98,10 @@ class TrendIdentifierDbAdapter:
                             PARTITION BY history.symbol
                             ORDER BY history.trade_date DESC
                         ) AS session_rank
-                    FROM trend_history_fo_universe AS history
+                    FROM historical_trend_outputs AS history
                     JOIN target_symbols USING (symbol)
-                    WHERE history.user_id = :user_id
+                    WHERE history.acquisition_id = :acquisition_id
+                      AND history.user_id = :user_id
                       AND history.trade_date <= :run_date
                 )
                 SELECT
@@ -110,6 +150,7 @@ class TrendIdentifierDbAdapter:
                 "run_date": self.run_date,
                 "history_days": self.history_days,
                 "user_id": self.user_id,
+                "acquisition_id": acquisition_id,
             },
         )
 

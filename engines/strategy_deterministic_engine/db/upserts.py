@@ -48,6 +48,54 @@ DO UPDATE SET
 """)
 
 
+HISTORICAL_ACQUISITION_INSERT_SQL = text("""
+INSERT INTO historical_price_acquisitions (
+    id, source_account, target_session_date, retrieved_at, source,
+    status, finality_status, content_hash
+)
+VALUES (
+    :id, :source_account, :target_session_date, :retrieved_at,
+    'ZERODHA_HISTORICAL_DATA', :status, :finality_status, :content_hash
+)
+""")
+
+HISTORICAL_SNAPSHOT_INSERT_SQL = text("""
+INSERT INTO historical_price_snapshots (
+    id, acquisition_id, source_account, symbol, exchange, tradingsymbol,
+    instrument_token, interval, target_session_date, covered_from, covered_to,
+    retrieved_at, bar_count, content_hash, validation_status
+)
+VALUES (
+    :id, :acquisition_id, :source_account, :symbol, :exchange, :tradingsymbol,
+    :instrument_token, :interval, :target_session_date, :covered_from, :covered_to,
+    :retrieved_at, :bar_count, :content_hash, :validation_status
+)
+""")
+
+HISTORICAL_BAR_INSERT_SQL = text("""
+INSERT INTO historical_price_bars (
+    snapshot_id, observed_at, session_date, open, high, low, close, volume, oi
+)
+VALUES (
+    :snapshot_id, :observed_at, :session_date, :open, :high, :low, :close,
+    :volume, :oi
+)
+""")
+
+HISTORICAL_TREND_OUTPUT_INSERT_SQL = text("""
+INSERT INTO historical_trend_outputs (
+    acquisition_id, daily_snapshot_id, user_id, symbol, trade_date, close,
+    label, confidence, aggregate_score, internal_state, exchange,
+    tradingsymbol, instrument_token
+)
+VALUES (
+    :acquisition_id, :daily_snapshot_id, :user_id, :symbol, :trade_date, :close,
+    :label, :confidence, :aggregate_score, :internal_state, :exchange,
+    :tradingsymbol, :instrument_token
+)
+""")
+
+
 CONTRACT_SNAPSHOT_UPSERT_SQL = text("""
 INSERT INTO contract_snapshot_fo_universe (
     user_id,
@@ -107,6 +155,7 @@ INSERT INTO strategy_deterministic_engine_runs (
     evaluated_symbols_count,
     input_exclusion_count,
     input_exclusions_json,
+    historical_acquisition_id,
     updated_at
 )
 VALUES (
@@ -120,6 +169,7 @@ VALUES (
     NULL,
     :input_exclusion_count,
     :input_exclusions_json,
+    :historical_acquisition_id,
     now()
 )
 ON CONFLICT (run_date)
@@ -137,6 +187,7 @@ DO UPDATE SET
     evaluated_symbols_count = NULL,
     input_exclusion_count = EXCLUDED.input_exclusion_count,
     input_exclusions_json = EXCLUDED.input_exclusions_json,
+    historical_acquisition_id = EXCLUDED.historical_acquisition_id,
     updated_at = now()
 WHERE strategy_deterministic_engine_runs.status <> 'COMPLETED'
    OR (
@@ -160,11 +211,35 @@ def persist_strict_trend_preparation(
     requested_symbols_count: int,
     prepared_symbols_count: int,
     exclusions: list[dict],
+    acquisition: dict,
     batch_size: int = 500,
     allow_unverified_completed_restart: bool = False,
 ) -> int:
     """Atomically persist exact-date rows and their requested-universe audit."""
     with engine.begin() as conn:
+        conn.execute(
+            HISTORICAL_ACQUISITION_INSERT_SQL,
+            {key: acquisition[key] for key in (
+                "id", "source_account", "target_session_date", "retrieved_at",
+                "status", "finality_status", "content_hash",
+            )},
+        )
+        for start in range(0, len(acquisition["snapshots"]), batch_size):
+            conn.execute(
+                HISTORICAL_SNAPSHOT_INSERT_SQL,
+                acquisition["snapshots"][start:start + batch_size],
+            )
+        for start in range(0, len(acquisition["bars"]), batch_size):
+            conn.execute(
+                HISTORICAL_BAR_INSERT_SQL,
+                acquisition["bars"][start:start + batch_size],
+            )
+        for start in range(0, len(acquisition["trend_outputs"]), batch_size):
+            conn.execute(
+                HISTORICAL_TREND_OUTPUT_INSERT_SQL,
+                acquisition["trend_outputs"][start:start + batch_size],
+            )
+
         total = 0
         for start in range(0, len(rows), batch_size):
             batch = rows[start:start + batch_size]
@@ -186,6 +261,7 @@ def persist_strict_trend_preparation(
                 "allow_unverified_completed_restart": (
                     allow_unverified_completed_restart
                 ),
+                "historical_acquisition_id": acquisition["id"],
             },
         ).fetchone()
         if run_row is None:
@@ -224,6 +300,7 @@ INSERT INTO strategy_deterministic_engine_runs (
     evaluated_symbols_count,
     input_exclusion_count,
     input_exclusions_json,
+    historical_acquisition_id,
     updated_at
 )
 VALUES (
@@ -237,6 +314,7 @@ VALUES (
     :evaluated_symbols_count,
     :input_exclusion_count,
     :input_exclusions_json,
+    :historical_acquisition_id,
     now()
 )
 ON CONFLICT (run_date)
@@ -254,6 +332,7 @@ DO UPDATE SET
     evaluated_symbols_count = EXCLUDED.evaluated_symbols_count,
     input_exclusion_count = EXCLUDED.input_exclusion_count,
     input_exclusions_json = EXCLUDED.input_exclusions_json,
+    historical_acquisition_id = EXCLUDED.historical_acquisition_id,
     updated_at = now()
 RETURNING id
 """)
@@ -383,6 +462,9 @@ def create_or_restart_strategy_run(
                 json.dumps(exclusions, sort_keys=True, separators=(",", ":"))
                 if exclusions is not None
                 else None
+            ),
+            "historical_acquisition_id": provenance.get(
+                "historical_acquisition_id"
             ),
         },
     ).fetchone()
