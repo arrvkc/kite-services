@@ -39,6 +39,10 @@ class NseFinalCloseUnavailable(RuntimeError):
     """Official final evidence is not available or cannot be validated."""
 
 
+class NseFinalCloseNotPublished(NseFinalCloseUnavailable):
+    """The exact official archive does not exist yet for the requested date."""
+
+
 class NseFinalCloseIdentityError(RuntimeError):
     """Official evidence has a missing or ambiguous instrument identity."""
 
@@ -91,6 +95,20 @@ class NseFinalCloseCatalog:
         self._archive_hashes = archive_hashes
         self._archive_names = archive_names
         self.retrieved_at = retrieved_at
+
+    @property
+    def source_name(self) -> str:
+        return "+".join(
+            self._archive_names[segment] for segment in sorted(self._archive_names)
+        )
+
+    @property
+    def source_sha256(self) -> str:
+        material = "|".join(
+            f"{segment}:{self._archive_hashes[segment]}"
+            for segment in sorted(self._archive_hashes)
+        )
+        return hashlib.sha256(material.encode("ascii")).hexdigest()
 
     def resolve(self, instrument: dict, target_date: date) -> OfficialFinalCloseEvidence:
         if target_date != self.session_date:
@@ -171,7 +189,13 @@ class NseFinalCloseProvider:
                 },
                 timeout=self._timeout,
             )
+            if response.status_code == 404:
+                raise NseFinalCloseNotPublished(
+                    f"Official NSE {segment} final evidence is not published."
+                )
             response.raise_for_status()
+        except NseFinalCloseNotPublished:
+            raise
         except requests.RequestException as exc:
             raise NseFinalCloseUnavailable(
                 f"Official NSE {segment} final evidence is unavailable."
@@ -223,11 +247,13 @@ class NseFinalCloseProvider:
                 )
         return rows, hashlib.sha256(content).hexdigest(), archive_name
 
-    def fetch(self, session_date: date) -> NseFinalCloseCatalog:
+    def fetch_segments(
+        self, session_date: date, segments: tuple[str, ...]
+    ) -> NseFinalCloseCatalog:
         rows_by_segment: dict[str, list[dict[str, str]]] = {}
         archive_hashes: dict[str, str] = {}
         archive_names: dict[str, str] = {}
-        for segment in ("CM", "FO"):
+        for segment in segments:
             rows, archive_hash, archive_name = self._fetch_segment(
                 segment, session_date
             )
@@ -241,3 +267,10 @@ class NseFinalCloseProvider:
             archive_names=archive_names,
             retrieved_at=datetime.now(timezone.utc),
         )
+
+    def fetch_cash(self, session_date: date) -> NseFinalCloseCatalog:
+        """Fetch only the official cash-market final archive."""
+        return self.fetch_segments(session_date, ("CM",))
+
+    def fetch(self, session_date: date) -> NseFinalCloseCatalog:
+        return self.fetch_segments(session_date, ("CM", "FO"))
