@@ -304,18 +304,17 @@ class NseTradingSessionProvider:
                 "EXPECTED_SESSION_NOT_FINAL",
             )
         except NseFinalCloseUnavailable:
-            declared_holiday = target_date in holidays
             # Valid current-day metadata can close an ordinary weekend without
-            # treating ambiguous historical weekends as closed.
-            current_ordinary_weekend = (
+            # treating ambiguous historical weekends or holidays as closed.
+            current_expected_closure = (
                 target_date == local_today
-                and target_date.weekday() >= 5
+                and (target_date.weekday() >= 5 or target_date in holidays)
                 and market_timestamp is not None
                 and market_date is not None
                 and market_date < target_date
                 and market_status in {"CLOSE", "CLOSED"}
             )
-            if declared_holiday or current_ordinary_weekend:
+            if current_expected_closure:
                 return no_session_evidence(
                     "NSE_HOLIDAY_MASTER+NSE_MARKET_STATUS"
                 )

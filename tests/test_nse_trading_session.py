@@ -88,7 +88,10 @@ def test_weekday_holiday_is_clean_no_session_when_final_archive_is_unavailable()
     prior = market("11-Sep-2026 15:30", "Close")
     holiday_evidence = provider(
         [holiday_row], prior, NseFinalCloseUnavailable("unavailable")
-    ).resolve(holiday, now=NOW)
+    ).resolve(
+        holiday,
+        now=datetime(2026, 9, 14, 12, tzinfo=timezone.utc),
+    )
     assert (
         holiday_evidence.classification
         == SessionClassification.NO_TRADING_SESSION
@@ -163,6 +166,32 @@ def test_historical_weekend_archive_transport_ambiguity_fails_closed():
     assert evidence.classification == SessionClassification.UNRESOLVED
     assert evidence.readiness == SessionReadiness.UNRESOLVED
     assert evidence.reason_code == "FINAL_ARCHIVE_UNAVAILABLE"
+
+
+def test_historical_holiday_archive_transport_ambiguity_fails_closed():
+    target = date(2026, 9, 14)
+    evidence = provider(
+        [{"tradingDate": "14-Sep-2026"}],
+        market("18-Sep-2026 15:30", "Close"),
+        NseFinalCloseUnavailable("transport failure"),
+    ).resolve(target, now=NOW)
+    assert evidence.classification == SessionClassification.UNRESOLVED
+    assert evidence.readiness == SessionReadiness.UNRESOLVED
+    assert evidence.reason_code == "FINAL_ARCHIVE_UNAVAILABLE"
+
+
+def test_current_holiday_market_status_proves_special_session():
+    target = date(2026, 9, 14)
+    evidence = provider(
+        [{"tradingDate": "14-Sep-2026"}],
+        market("14-Sep-2026 18:00", "Open"),
+        NseFinalCloseUnavailable("unavailable"),
+    ).resolve(
+        target,
+        now=datetime(2026, 9, 14, 12, tzinfo=timezone.utc),
+    )
+    assert evidence.classification == SessionClassification.SPECIAL_SESSION
+    assert evidence.readiness == SessionReadiness.NOT_COMPLETE
 
 
 def test_current_weekend_invalid_market_schema_fails_closed():
