@@ -1,9 +1,12 @@
 from datetime import date, datetime, timezone
 from unittest.mock import MagicMock
 
+import requests
+
 from services.nse_final_close import (
     NseFinalCloseCatalog,
     NseFinalCloseNotPublished,
+    NseFinalCloseUnavailable,
 )
 from services.nse_trading_session import (
     NSE_HOLIDAY_URL,
@@ -79,20 +82,51 @@ def test_normal_weekday_waits_for_official_close_then_completes():
     assert closed.session_end is not None
 
 
-def test_weekday_holiday_and_normal_weekend_are_clean_no_session():
+def test_weekday_holiday_is_clean_no_session_when_final_archive_is_unavailable():
     holiday = date(2026, 9, 14)
     holiday_row = {"tradingDate": "14-Sep-2026"}
     prior = market("11-Sep-2026 15:30", "Close")
     holiday_evidence = provider(
-        [holiday_row], prior, NseFinalCloseNotPublished("missing")
+        [holiday_row], prior, NseFinalCloseUnavailable("unavailable")
     ).resolve(holiday, now=NOW)
-    weekend = provider(
-        [], prior, NseFinalCloseNotPublished("missing")
-    ).resolve(date(2026, 9, 19), now=NOW)
-    assert holiday_evidence.classification == SessionClassification.NO_TRADING_SESSION
+    assert (
+        holiday_evidence.classification
+        == SessionClassification.NO_TRADING_SESSION
+    )
     assert holiday_evidence.readiness == SessionReadiness.NO_SESSION
-    assert weekend.classification == SessionClassification.NO_TRADING_SESSION
-    assert weekend.readiness == SessionReadiness.NO_SESSION
+
+
+def test_current_ordinary_sunday_without_final_archive_is_clean_no_session():
+    target = date(2026, 9, 20)
+    evidence = provider(
+        [],
+        market("18-Sep-2026 15:30", "Close"),
+        NseFinalCloseUnavailable("unavailable"),
+    ).resolve(target, now=datetime(2026, 9, 20, 12, tzinfo=timezone.utc))
+    assert evidence.classification == SessionClassification.NO_TRADING_SESSION
+    assert evidence.readiness == SessionReadiness.NO_SESSION
+
+
+def test_current_ordinary_saturday_without_final_archive_is_clean_no_session():
+    target = date(2026, 9, 19)
+    evidence = provider(
+        [],
+        market("18-Sep-2026 15:30", "Close"),
+        NseFinalCloseUnavailable("unavailable"),
+    ).resolve(target, now=NOW)
+    assert evidence.classification == SessionClassification.NO_TRADING_SESSION
+    assert evidence.readiness == SessionReadiness.NO_SESSION
+
+
+def test_explicitly_unpublished_historical_weekend_is_clean_no_session():
+    target = date(2026, 9, 12)
+    evidence = provider(
+        [],
+        market("18-Sep-2026 15:30", "Close"),
+        NseFinalCloseNotPublished("missing"),
+    ).resolve(target, now=NOW)
+    assert evidence.classification == SessionClassification.NO_TRADING_SESSION
+    assert evidence.readiness == SessionReadiness.NO_SESSION
 
 
 def test_official_weekend_special_session_is_eligible_only_after_close():
@@ -117,6 +151,41 @@ def test_historical_special_session_is_proven_by_final_archive():
     assert evidence.classification == SessionClassification.SPECIAL_SESSION
     assert evidence.readiness == SessionReadiness.COMPLETE
     assert evidence.source.endswith("NSE_FINAL_ARCHIVE")
+
+
+def test_historical_weekend_archive_transport_ambiguity_fails_closed():
+    target = date(2026, 9, 12)
+    evidence = provider(
+        [],
+        market("18-Sep-2026 15:30", "Close"),
+        NseFinalCloseUnavailable("transport failure"),
+    ).resolve(target, now=NOW)
+    assert evidence.classification == SessionClassification.UNRESOLVED
+    assert evidence.readiness == SessionReadiness.UNRESOLVED
+    assert evidence.reason_code == "FINAL_ARCHIVE_UNAVAILABLE"
+
+
+def test_current_weekend_invalid_market_schema_fails_closed():
+    target = date(2026, 9, 20)
+    evidence = provider(
+        [],
+        market("not-a-date", "Close"),
+        NseFinalCloseUnavailable("unavailable"),
+    ).resolve(target, now=datetime(2026, 9, 20, 12, tzinfo=timezone.utc))
+    assert evidence.classification == SessionClassification.UNRESOLVED
+    assert evidence.readiness == SessionReadiness.UNRESOLVED
+    assert evidence.reason_code == "FINAL_ARCHIVE_UNAVAILABLE"
+
+
+def test_weekday_session_metadata_transport_failure_fails_closed():
+    session = MagicMock()
+    session.get.side_effect = requests.ConnectionError("transport failure")
+    evidence = NseTradingSessionProvider(session=session).resolve(
+        date(2026, 9, 18), now=NOW
+    )
+    assert evidence.classification == SessionClassification.UNRESOLVED
+    assert evidence.readiness == SessionReadiness.UNRESOLVED
+    assert evidence.reason_code == "SESSION_METADATA_UNAVAILABLE"
 
 
 def test_unknown_or_ambiguous_status_fails_closed():

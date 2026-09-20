@@ -230,6 +230,20 @@ class NseTradingSessionProvider:
             f"{holidays_hash}|{market_hash}".encode("ascii")
         ).hexdigest()
 
+        def no_session_evidence(source: str) -> NseTradingSessionEvidence:
+            return NseTradingSessionEvidence(
+                target_date,
+                "CM",
+                SessionClassification.NO_TRADING_SESSION,
+                SessionReadiness.NO_SESSION,
+                None,
+                None,
+                source,
+                provenance,
+                checked_at,
+                "NO_OFFICIAL_TRADING_SESSION",
+            )
+
         if market_date == target_date:
             if market_status in {"CLOSE", "CLOSED"}:
                 return NseTradingSessionEvidence(
@@ -274,17 +288,8 @@ class NseTradingSessionProvider:
             catalog = self._final_close_provider.fetch_cash(target_date)
         except NseFinalCloseNotPublished:
             if target_date.weekday() >= 5 or target_date in holidays:
-                return NseTradingSessionEvidence(
-                    target_date,
-                    "CM",
-                    SessionClassification.NO_TRADING_SESSION,
-                    SessionReadiness.NO_SESSION,
-                    None,
-                    None,
-                    "NSE_HOLIDAY_MASTER+NSE_FINAL_ARCHIVE",
-                    provenance,
-                    checked_at,
-                    "NO_OFFICIAL_TRADING_SESSION",
+                return no_session_evidence(
+                    "NSE_HOLIDAY_MASTER+NSE_FINAL_ARCHIVE"
                 )
             return NseTradingSessionEvidence(
                 target_date,
@@ -299,6 +304,21 @@ class NseTradingSessionProvider:
                 "EXPECTED_SESSION_NOT_FINAL",
             )
         except NseFinalCloseUnavailable:
+            declared_holiday = target_date in holidays
+            # Valid current-day metadata can close an ordinary weekend without
+            # treating ambiguous historical weekends as closed.
+            current_ordinary_weekend = (
+                target_date == local_today
+                and target_date.weekday() >= 5
+                and market_timestamp is not None
+                and market_date is not None
+                and market_date < target_date
+                and market_status in {"CLOSE", "CLOSED"}
+            )
+            if declared_holiday or current_ordinary_weekend:
+                return no_session_evidence(
+                    "NSE_HOLIDAY_MASTER+NSE_MARKET_STATUS"
+                )
             return NseTradingSessionEvidence(
                 target_date,
                 "CM",
