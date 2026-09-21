@@ -401,16 +401,28 @@ class EquityTrendHistoryRunner:
                     f"on {target_date}: expected one target-session daily candle."
                 )
 
-            latest_target_hour = None
+            target_intraday_coverage_end = None
             if not target_hourly.empty:
-                latest_target_hour = (
+                target_intraday_coverage_end = (
                     target_hourly["timestamp"]
                     .dt.tz_convert("Asia/Kolkata")
                     .max()
                 )
+                if (
+                    instrument_metadata.get("resolved_exchange") == "NSE"
+                    and instrument_metadata.get("kite_instrument_type") == "EQ"
+                ):
+                    # Zerodha labels NSE equity 60minute bars by interval start.
+                    # Compare their coverage end with the existing cutoff; the
+                    # futures contract is unchanged pending equivalent evidence.
+                    target_intraday_coverage_end += pd.Timedelta(minutes=60)
             if (
-                latest_target_hour is None
-                or latest_target_hour.time() < time(15, 15)
+                target_intraday_coverage_end is None
+                or target_intraday_coverage_end < pd.Timestamp(
+                    datetime.combine(
+                        target_date, time(15, 15), tzinfo=ZoneInfo("Asia/Kolkata")
+                    )
+                )
             ):
                 raise TargetSessionNotFinalized(
                     f"{symbol.upper()} target session {target_date} has no "

@@ -364,6 +364,86 @@ class HistoricalBackfillContractTests(unittest.TestCase):
         )
         return result, equity
 
+    def test_intraday_coverage_preserves_cutoff_for_daily_and_historical_runs(self):
+        for historical in (False, True):
+            for latest, accepted in (("14:15", True), ("13:15", False)):
+                with self.subTest(historical=historical, latest=latest):
+                    source, equity = self._coherent_history_result(
+                        "ABC", [100.0, 101.0, 102.0, 103.0, 104.0]
+                    )
+                    raw, _ = equity.build_raw_bars_for_symbol_asof.return_value
+                    # Six start-labelled hourly bars per session, matching the
+                    # observed NSE EQ shape, or five for an incomplete session.
+                    raw["hourly"] = pd.concat(
+                        [raw["hourly"].assign(
+                            timestamp=raw["hourly"]["timestamp"] - pd.Timedelta(hours=offset)
+                        ) for offset in range(6, 0 if latest == "14:15" else 1, -1)],
+                        ignore_index=True,
+                    ).sort_values("timestamp").reset_index(drop=True)
+                    before = raw["hourly"].copy(deep=True)
+                    runner = EquityTrendHistoryRunner.__new__(EquityTrendHistoryRunner)
+                    runner.exchange = "NSE"
+                    runner.equity_runner = equity
+                    target = source.source_window.target_session_date
+                    kwargs = dict(
+                        history_days=5,
+                        end_date=target,
+                        retrieved_at=datetime(
+                            2026, 5, 23 if historical else 22, 11,
+                            tzinfo=timezone.utc,
+                        ),
+                        final_close_resolver=lambda _metadata, day: official_close(
+                            "ABC", day, 104
+                        ),
+                    )
+                    if accepted:
+                        result = runner.build_history_for_symbol("ABC", **kwargs)
+                        self.assertEqual(result.source_window.finality_status, "FINALIZED")
+                        pd.testing.assert_frame_equal(result.source_window.hourly, before)
+                        self.assertEqual(result.source_window.hourly_content_hash, bars_content_hash(before))
+                        self.assertEqual(len(result.history), 5)
+                        kwargs["final_close_resolver"] = lambda _metadata, day: official_close(
+                            "ABC", day, 105
+                        )
+                        with self.assertRaisesRegex(TargetSessionNotFinalized, "does not match official NSE final"):
+                            runner.build_history_for_symbol("ABC", **kwargs)
+                    else:
+                        with self.assertRaisesRegex(TargetSessionNotFinalized, "no completed intraday evidence"):
+                            runner.build_history_for_symbol("ABC", **kwargs)
+                    pd.testing.assert_frame_equal(raw["hourly"], before)
+
+    def test_intraday_coverage_requires_target_date_and_preserves_futures_guard(self):
+        for case in ("missing", "wrong_date", "futures_14:15", "futures_15:15"):
+            with self.subTest(case=case):
+                source, equity = self._coherent_history_result(
+                    "ABC", [100.0, 101.0, 102.0, 103.0, 104.0]
+                )
+                raw, metadata = equity.build_raw_bars_for_symbol_asof.return_value
+                target = source.source_window.target_session_date
+                target_mask = raw["hourly"]["timestamp"].dt.date.eq(target)
+                if case == "missing":
+                    raw["hourly"] = raw["hourly"].iloc[:0].copy()
+                elif case == "wrong_date":
+                    raw["hourly"].loc[target_mask, "timestamp"] += pd.Timedelta(days=1)
+                else:
+                    metadata.update(resolved_exchange="NFO", kite_instrument_type="FUT")
+                    if case == "futures_14:15":
+                        raw["hourly"]["timestamp"] -= pd.Timedelta(hours=1)
+                runner = EquityTrendHistoryRunner.__new__(EquityTrendHistoryRunner)
+                runner.exchange = "NSE"
+                runner.equity_runner = equity
+                kwargs = dict(
+                    history_days=5, end_date=target,
+                    retrieved_at=datetime(2026, 5, 23, tzinfo=timezone.utc),
+                    final_close_resolver=lambda _metadata, day: official_close("ABC", day, 104),
+                )
+                if case == "futures_15:15":
+                    result = runner.build_history_for_symbol("ABC", **kwargs)
+                    self.assertEqual(result.source_window.finality_status, "FINALIZED")
+                else:
+                    with self.assertRaisesRegex(TargetSessionNotFinalized, "no completed intraday evidence"):
+                        runner.build_history_for_symbol("ABC", **kwargs)
+
     def test_adjusted_bonus_examples_remain_one_unmodified_coherent_window(self):
         examples = {
             "LICI": [401.20, 398.90, 402.10, 399.80, 398.10],
