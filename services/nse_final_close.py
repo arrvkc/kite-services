@@ -14,9 +14,19 @@ from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 import hashlib
 import io
+import socket
+import sys
 import zipfile
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.connection import HTTPSConnection
+from urllib3.connectionpool import HTTPSConnectionPool
+from urllib3.exceptions import (
+    ConnectTimeoutError,
+    NameResolutionError,
+    NewConnectionError,
+)
 
 
 NSE_ARCHIVE_ROOT = "https://nsearchives.nseindia.com/content"
@@ -33,6 +43,85 @@ _REQUIRED_COLUMNS = {
     "FinInstrmNm",
     "ClsPric",
 }
+
+
+def _create_ipv4_connection(
+    address: tuple[str, int],
+    timeout: float | None,
+    source_address: tuple[str, int] | None,
+    socket_options: list[tuple[int, int, int]] | None,
+) -> socket.socket:
+    """Connect through IPv4 without changing process-wide DNS behavior."""
+    host, port = address
+    if host.startswith("["):
+        host = host.strip("[]")
+    error: OSError | None = None
+    for family, socktype, proto, _canonname, sockaddr in socket.getaddrinfo(
+        host, port, socket.AF_INET, socket.SOCK_STREAM
+    ):
+        sock = None
+        try:
+            sock = socket.socket(family, socktype, proto)
+            for option in socket_options or ():
+                sock.setsockopt(*option)
+            sock.settimeout(timeout)
+            if source_address:
+                sock.bind(source_address)
+            sock.connect(sockaddr)
+            return sock
+        except OSError as exc:
+            error = exc
+            if sock is not None:
+                sock.close()
+    if error is not None:
+        raise error
+    raise OSError("IPv4 DNS resolution returned no addresses")
+
+
+class _NseIPv4HTTPSConnection(HTTPSConnection):
+    """Keep the official archive request off NSE's rejecting IPv6 edge."""
+
+    def _new_conn(self) -> socket.socket:
+        try:
+            sock = _create_ipv4_connection(
+                (self._dns_host, self.port),
+                self.timeout,
+                self.source_address,
+                self.socket_options,
+            )
+        except socket.gaierror as exc:
+            raise NameResolutionError(self.host, self, exc) from exc
+        except TimeoutError as exc:
+            raise ConnectTimeoutError(
+                self,
+                f"Connection to {self.host} timed out. "
+                f"(connect timeout={self.timeout})",
+            ) from exc
+        except OSError as exc:
+            raise NewConnectionError(
+                self, f"Failed to establish a new connection: {exc}"
+            ) from exc
+        sys.audit("http.client.connect", self, self.host, self.port)
+        return sock
+
+
+class _NseIPv4HTTPSConnectionPool(HTTPSConnectionPool):
+    ConnectionCls = _NseIPv4HTTPSConnection
+
+
+class _NseIPv4HTTPAdapter(HTTPAdapter):
+    """Scope IPv4 selection to the official NSE archive URL prefix."""
+
+    def init_poolmanager(self, connections, maxsize, block=False, **pool_kwargs):
+        super().init_poolmanager(
+            connections, maxsize, block=block, **pool_kwargs
+        )
+        self.poolmanager.pool_classes_by_scheme = (
+            self.poolmanager.pool_classes_by_scheme.copy()
+        )
+        self.poolmanager.pool_classes_by_scheme["https"] = (
+            _NseIPv4HTTPSConnectionPool
+        )
 
 
 class NseFinalCloseUnavailable(RuntimeError):
@@ -168,6 +257,10 @@ class NseFinalCloseProvider:
 
     def __init__(self, session: requests.Session | None = None, timeout: int = 30) -> None:
         self._session = session or requests.Session()
+        if isinstance(self._session, requests.Session):
+            self._session.mount(
+                f"{NSE_ARCHIVE_ROOT}/", _NseIPv4HTTPAdapter()
+            )
         self._timeout = timeout
 
     @staticmethod
@@ -191,14 +284,19 @@ class NseFinalCloseProvider:
             )
             if response.status_code == 404:
                 raise NseFinalCloseNotPublished(
-                    f"Official NSE {segment} final evidence is not published."
+                    f"Official NSE {segment} final evidence is not published. "
+                    "http_status=404"
                 )
             response.raise_for_status()
         except NseFinalCloseNotPublished:
             raise
         except requests.RequestException as exc:
+            response = getattr(exc, "response", None)
+            status = getattr(response, "status_code", None)
+            safe_status = str(status) if isinstance(status, int) else "NONE"
             raise NseFinalCloseUnavailable(
-                f"Official NSE {segment} final evidence is unavailable."
+                f"Official NSE {segment} final evidence is unavailable. "
+                f"cause={type(exc).__name__} http_status={safe_status}"
             ) from exc
         content = response.content
         if not content or len(content) > _MAX_ARCHIVE_BYTES:

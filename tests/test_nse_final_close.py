@@ -1,13 +1,21 @@
 from datetime import date
 from decimal import Decimal
 import io
+import socket
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 import zipfile
 
+import requests
+
 from services.nse_final_close import (
+    NSE_ARCHIVE_ROOT,
     NseFinalCloseIdentityError,
+    NseFinalCloseNotPublished,
     NseFinalCloseProvider,
+    NseFinalCloseUnavailable,
+    _NseIPv4HTTPSConnectionPool,
+    _create_ipv4_connection,
     closes_match,
 )
 
@@ -105,6 +113,136 @@ class NseFinalCloseTests(unittest.TestCase):
                 "BhavCopy_NSE_FO_0_0_0_20260917_F_0000.csv.zip",
             ],
         )
+
+    def test_default_provider_scopes_ipv4_transport_to_nse_archives(self):
+        provider = NseFinalCloseProvider()
+
+        archive_adapter = provider._session.get_adapter(
+            f"{NSE_ARCHIVE_ROOT}/cm/archive.zip"
+        )
+        ordinary_adapter = provider._session.get_adapter("https://example.com/")
+
+        self.assertIs(
+            archive_adapter.poolmanager.pool_classes_by_scheme["https"],
+            _NseIPv4HTTPSConnectionPool,
+        )
+        self.assertIsNot(archive_adapter, ordinary_adapter)
+
+    def test_shared_session_keeps_other_nse_requests_on_existing_transport(self):
+        session = requests.Session()
+        original_adapter = session.get_adapter("https://www.nseindia.com/")
+        NseFinalCloseProvider(session=session)
+
+        self.assertIs(session.get_adapter("https://www.nseindia.com/"), original_adapter)
+        self.assertIsNot(
+            session.get_adapter(f"{NSE_ARCHIVE_ROOT}/cm/archive.zip"),
+            original_adapter,
+        )
+
+    def test_temporary_http_failure_can_recover_on_next_governed_attempt(self):
+        session = MagicMock()
+        failed = requests.Response()
+        failed.status_code = 403
+        successful = requests.Response()
+        successful.status_code = 200
+        successful._content = archive("CM", [cm_row()])
+        session.get.side_effect = [failed, successful]
+        provider = NseFinalCloseProvider(session=session)
+
+        with self.assertRaisesRegex(NseFinalCloseUnavailable, "http_status=403"):
+            provider.fetch_cash(date(2026, 9, 17))
+        catalog = provider.fetch_cash(date(2026, 9, 17))
+        evidence = catalog.resolve(
+            {
+                "resolved_exchange": "NSE",
+                "resolved_tradingsymbol": "LICI",
+                "kite_instrument_type": "EQ",
+            },
+            date(2026, 9, 17),
+        )
+        self.assertEqual(evidence.close, Decimal("398.10"))
+        self.assertEqual(session.get.call_count, 2)
+
+    @patch("services.nse_final_close.socket.socket")
+    @patch("services.nse_final_close.socket.getaddrinfo")
+    def test_archive_transport_resolves_only_ipv4(self, getaddrinfo, socket_factory):
+        sock = socket_factory.return_value
+        getaddrinfo.return_value = [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("203.0.113.8", 443))
+        ]
+
+        result = _create_ipv4_connection(
+            ("nsearchives.nseindia.com", 443), 30, None, None
+        )
+
+        self.assertIs(result, sock)
+        getaddrinfo.assert_called_once_with(
+            "nsearchives.nseindia.com",
+            443,
+            socket.AF_INET,
+            socket.SOCK_STREAM,
+        )
+        sock.connect.assert_called_once_with(("203.0.113.8", 443))
+
+    def test_http_failure_retains_safe_status_and_cause(self):
+        session = MagicMock()
+        response = MagicMock()
+        response.status_code = 403
+        response.raise_for_status.side_effect = requests.HTTPError(
+            "synthetic secret must not be retained", response=response
+        )
+        session.get.return_value = response
+
+        with self.assertRaisesRegex(
+            NseFinalCloseUnavailable,
+            r"cause=HTTPError http_status=403$",
+        ) as raised:
+            NseFinalCloseProvider(session=session).fetch_cash(date(2026, 9, 17))
+
+        self.assertNotIn("synthetic secret", str(raised.exception))
+
+    def test_transport_failure_retains_safe_cause_without_raw_detail(self):
+        session = MagicMock()
+        session.get.side_effect = requests.ConnectTimeout(
+            "synthetic account marker must not be retained"
+        )
+
+        with self.assertRaisesRegex(
+            NseFinalCloseUnavailable,
+            r"cause=ConnectTimeout http_status=NONE$",
+        ) as raised:
+            NseFinalCloseProvider(session=session).fetch_cash(date(2026, 9, 17))
+
+        self.assertNotIn("synthetic account marker", str(raised.exception))
+
+    def test_unpublished_archive_remains_distinct_from_transport_failure(self):
+        session = MagicMock()
+        response = requests.Response()
+        response.status_code = 404
+        session.get.return_value = response
+
+        with self.assertRaisesRegex(NseFinalCloseNotPublished, "http_status=404"):
+            NseFinalCloseProvider(session=session).fetch_cash(date(2026, 9, 17))
+
+    @patch("services.nse_final_close.socket.socket")
+    @patch("services.nse_final_close.socket.getaddrinfo")
+    def test_failed_ipv4_address_is_closed_before_trying_next(self, getaddrinfo, socket_factory):
+        getaddrinfo.return_value = [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("203.0.113.8", 443)),
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("203.0.113.9", 443)),
+        ]
+        failed, successful = MagicMock(), MagicMock()
+        failed.connect.side_effect = TimeoutError("synthetic transport failure")
+        socket_factory.side_effect = [failed, successful]
+
+        result = _create_ipv4_connection(
+            ("nsearchives.nseindia.com", 443), 30, None, None
+        )
+
+        self.assertIs(result, successful)
+        failed.close.assert_called_once_with()
+        successful.connect.assert_called_once_with(("203.0.113.9", 443))
+        successful.settimeout.assert_called_once_with(30)
 
     def test_missing_wrong_or_duplicate_identity_fails_closed(self):
         catalog = self.catalog(cm_rows=[cm_row(), cm_row()])
