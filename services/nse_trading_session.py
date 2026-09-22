@@ -8,7 +8,7 @@ No clock time or locally maintained holiday list is treated as authority.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from enum import Enum
 import hashlib
 import json
@@ -178,6 +178,26 @@ class NseTradingSessionProvider:
         if target_date.weekday() >= 5 or target_date in holidays:
             return SessionClassification.SPECIAL_SESSION
         return SessionClassification.NORMAL_SESSION
+
+    def previous_session(
+        self, before_date: date, *, now: datetime | None = None
+    ) -> NseTradingSessionEvidence:
+        """Resolve the nearest prior session; skip only proven closures.
+
+        Missing final data on an expected session is NOT a holiday. Return
+        that pending/unknown evidence rather than silently choosing older data.
+        The 31-day bound limits official requests, not the trading calendar.
+        """
+        for offset in range(1, 32):
+            evidence = self.resolve(before_date - timedelta(days=offset), now=now)
+            if evidence.readiness != SessionReadiness.NO_SESSION:
+                return evidence
+        return NseTradingSessionEvidence(
+            before_date - timedelta(days=31), "CM",
+            SessionClassification.UNRESOLVED, SessionReadiness.UNRESOLVED,
+            None, None, evidence.source, evidence.provenance,
+            evidence.checked_at, "PREVIOUS_SESSION_SEARCH_EXHAUSTED",
+        )
 
     def resolve(
         self,

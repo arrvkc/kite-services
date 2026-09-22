@@ -224,3 +224,43 @@ def test_unknown_or_ambiguous_status_fails_closed():
     )
     assert evidence.classification == SessionClassification.UNRESOLVED
     assert evidence.readiness == SessionReadiness.UNRESOLVED
+
+
+def test_previous_session_tuesday_and_saturday_at_0030_ist():
+    from zoneinfo import ZoneInfo
+    for today, target in ((date(2026, 9, 22), date(2026, 9, 21)),
+                          (date(2026, 9, 19), date(2026, 9, 18))):
+        now = datetime.combine(today, datetime.min.time(), tzinfo=ZoneInfo("Asia/Kolkata")).replace(minute=30)
+        p = provider([], market(target.strftime("%d-%b-%Y") + " 15:30", "Close"))
+        evidence = p.previous_session(today, now=now)
+        assert evidence.session_date == target
+        assert evidence.readiness == SessionReadiness.COMPLETE
+
+
+def test_previous_session_skips_only_proven_holidays_and_weekends():
+    # Monday is an official holiday; Tuesday resolves Friday. Never infer that
+    # a weekend is closed merely because archives failed at transport level.
+    p = provider([{"tradingDate": "21-Sep-2026"}], market("18-Sep-2026 15:30", "Close"),
+                 NseFinalCloseNotPublished("404"))
+    evidence = p.previous_session(date(2026, 9, 22), now=datetime(2026, 9, 22, tzinfo=timezone.utc))
+    assert evidence.session_date == date(2026, 9, 18)
+    assert evidence.readiness == SessionReadiness.COMPLETE
+    assert p._final_close_provider.fetch_cash.call_count == 3
+
+
+def test_previous_session_never_skips_unknown_or_pending_session():
+    for error, expected in ((NseFinalCloseUnavailable("transport"), SessionReadiness.UNRESOLVED),
+                            (NseFinalCloseNotPublished("404"), SessionReadiness.NOT_COMPLETE)):
+        p = provider([], market("18-Sep-2026 15:30", "Close"), error)
+        evidence = p.previous_session(date(2026, 9, 22), now=datetime(2026, 9, 22, tzinfo=timezone.utc))
+        assert evidence.session_date == date(2026, 9, 21)
+        assert evidence.readiness == expected
+        assert p._final_close_provider.fetch_cash.call_count == 1
+
+
+def test_previous_session_preserves_special_sunday_archive():
+    p = provider([], market("18-Sep-2026 15:30", "Close"), final_catalog(date(2026, 9, 20)))
+    evidence = p.previous_session(date(2026, 9, 21), now=datetime(2026, 9, 21, tzinfo=timezone.utc))
+    assert evidence.session_date == date(2026, 9, 20)
+    assert evidence.classification == SessionClassification.SPECIAL_SESSION
+    assert evidence.readiness == SessionReadiness.COMPLETE

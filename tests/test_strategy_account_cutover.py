@@ -17,7 +17,7 @@ def test_future_transition_and_stop_account_scopes_are_explicit():
     transition = (ROOT / "scripts/run_transition_dashboard_pipeline.sh").read_text()
     stop = (ROOT / "run_stop_cron.sh").read_text()
 
-    assert "--user-id XJ1877" in transition
+    assert '--user-id "${EAJEE_STRATEGY_USER_ID:-XJ1877}"' in transition
     assert "--user-id OMK569" not in transition
     assert 'USER_IDS=("XJ1877" "OMK569" "SQW865" "DKJ644")' in stop
 

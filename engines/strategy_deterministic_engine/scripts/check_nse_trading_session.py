@@ -13,10 +13,15 @@ from services.nse_trading_session import (
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--run-date", required=True)
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--run-date")
+    group.add_argument("--previous-session-before")
     args = parser.parse_args()
-    target_date = date.fromisoformat(args.run_date)
-    evidence = NseTradingSessionProvider().resolve(target_date)
+    provider = NseTradingSessionProvider()
+    if args.previous_session_before:
+        evidence = provider.previous_session(date.fromisoformat(args.previous_session_before))
+    else:
+        evidence = provider.resolve(date.fromisoformat(args.run_date))
     values = {
         "NSE_SESSION_RESULT": evidence.readiness.value,
         "SESSION_CLASSIFICATION": evidence.classification.value,
