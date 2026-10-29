@@ -215,6 +215,26 @@ class NseFinalCloseCatalog:
         )
         return hashlib.sha256(material.encode("ascii")).hexdigest()
 
+    def filter_current_universe(self, current_symbols: list[str]) -> list[str]:
+        """Use archive membership, requiring a current broker identity for each member."""
+        historical = {row["TckrSymb"].strip().upper() for row in self._rows_by_segment["FO"]
+                      if row["FinInstrmTp"].strip().upper() in {"IDF", "STF"}}
+        current = {official_symbol_for_session(symbol, self.session_date): symbol for symbol in current_symbols}
+        if len(current) != len(current_symbols) or not historical or historical - current.keys():
+            raise NseFinalCloseIdentityError("Historical futures membership cannot be mapped exactly to broker identities.")
+        return sorted(current[symbol] for symbol in historical)
+
+    def nearest_index_future(self, symbol: str) -> tuple[date, str] | None:
+        historical_symbol = official_symbol_for_session(symbol, self.session_date)
+        rows = [row for row in self._rows_by_segment["FO"]
+                if row["TckrSymb"].strip().upper() == historical_symbol
+                and row["FinInstrmTp"].strip().upper() == "IDF"]
+        if not rows:
+            return None
+        expiry = self.monthly_futures_expiries(symbol)[0]
+        month = "JAN FEB MAR APR MAY JUN JUL AUG SEP OCT NOV DEC".split()[expiry.month - 1]
+        return expiry, f"{historical_symbol}{expiry.year % 100:02d}{month}FUT"
+
     def monthly_futures_expiries(self, symbol: str) -> list[date]:
         """Recover contracts listed in the exact session, including expired ones."""
         archive_symbol = official_symbol_for_session(symbol.strip().upper(), self.session_date)

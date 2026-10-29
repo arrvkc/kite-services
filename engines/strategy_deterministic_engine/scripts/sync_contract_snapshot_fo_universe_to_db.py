@@ -70,6 +70,8 @@ def main() -> None:
         except NseFinalCloseUnavailable:
             print("CONTRACT_SOURCE=PENDING reason=official_archive_unavailable")
             raise SystemExit(75) from None
+        if not args.symbols:
+            symbols = official_catalog.filter_current_universe(symbols)
         print(f"CONTRACT_SOURCE=NSE_FINAL_ARCHIVE selection_date={selection_date} source_name={official_catalog.source_name} source_hash={official_catalog.source_sha256}")
 
     rows: list[dict] = []

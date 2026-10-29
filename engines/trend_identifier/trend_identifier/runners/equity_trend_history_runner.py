@@ -24,6 +24,8 @@ from .equity_trend_runner import EquityTrendRunner
 NO_TRADING_ACTIVITY = "NO_TRADING_ACTIVITY"
 TARGET_DATE_HISTORY_UNAVAILABLE = "TARGET_DATE_HISTORY_UNAVAILABLE"
 TARGET_INTRADAY_HISTORY_UNAVAILABLE = "TARGET_INTRADAY_HISTORY_UNAVAILABLE"
+EXPIRED_CONTRACT_HISTORY_UNAVAILABLE = "EXPIRED_CONTRACT_HISTORY_UNAVAILABLE"
+GOVERNED_EXPIRED_INDEX_SYMBOLS = frozenset({"BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "NIFTY", "NIFTYFPI", "NIFTYNXT50"})
 GOVERNED_TARGET_INTRADAY_UNAVAILABLE_SYMBOLS = frozenset({"NIFTYFPI"})
 # This is deliberately symbol-scoped. Missing target bars for any other symbol
 # remain an unexpected fatal error until separately governed with evidence.
@@ -201,6 +203,27 @@ class TargetIntradayHistoryUnavailableCandidate(TargetDateHistoryUnavailableCand
         RuntimeError.__init__(self, f"{evidence.symbol} has a daily observation but no target-session intraday history on {evidence.target_date}.")
 
 
+@dataclass(frozen=True)
+class ExpiredContractHistoryUnavailableEvidence:
+    symbol: str
+    target_date: date
+    exchange: str
+    tradingsymbol: str
+    expiry_date: date
+    observed_at: datetime
+    official_source_name: str
+    official_source_hash: str
+
+
+class ExpiredContractHistoryUnavailableCandidate(RuntimeError):
+    """An expired index has no complete retained window for the exact session."""
+    reason = EXPIRED_CONTRACT_HISTORY_UNAVAILABLE
+
+    def __init__(self, evidence: ExpiredContractHistoryUnavailableEvidence):
+        self.evidence = evidence
+        super().__init__(f"{evidence.symbol} requires unavailable intraday history for expired contract {evidence.tradingsymbol}.")
+
+
 class EquityTrendHistoryRunner:
     """
     Reusable runner that builds a daily history of Trend Identifier outputs
@@ -315,6 +338,7 @@ class EquityTrendHistoryRunner:
         end_date: date | str | None = None,
         *,
         retrieved_at: datetime | None = None,
+        source_window: CoherentHistoricalWindow | None = None,
         final_close_resolver: Callable[
             [dict[str, Any], date], OfficialFinalCloseEvidence
         ]
@@ -330,7 +354,18 @@ class EquityTrendHistoryRunner:
         target_date = (
             date.fromisoformat(end_date) if isinstance(end_date, str) else end_date
         )
-        if target_date is None:
+        if source_window is not None:
+            if (source_window.symbol != symbol.upper() or source_window.target_session_date != target_date
+                    or source_window.finality_status != "FINALIZED" or source_window.exchange != "NFO"
+                    or bars_content_hash(source_window.daily) != source_window.daily_content_hash
+                    or bars_content_hash(source_window.hourly) != source_window.hourly_content_hash):
+                raise RuntimeError("Archived coherent source identity or content is invalid.")
+            raw_bars = {"daily": source_window.daily.copy(), "hourly": source_window.hourly.copy()}
+            instrument_metadata = {"resolved_exchange": source_window.exchange,
+                                   "resolved_tradingsymbol": source_window.tradingsymbol,
+                                   "instrument_token": source_window.instrument_token, "kite_instrument_type": "FUT"}
+            retrieved_at = source_window.retrieved_at
+        elif target_date is None:
             raw_bars, instrument_metadata = self.equity_runner.build_raw_bars_for_symbol(
                 symbol=symbol,
                 daily_lookback_days=daily_lookback_days,

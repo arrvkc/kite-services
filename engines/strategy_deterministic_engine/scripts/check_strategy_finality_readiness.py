@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import argparse
-from datetime import date
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
 
 from kiteconnect import KiteConnect
 from kiteconnect.exceptions import TokenException
@@ -18,6 +19,7 @@ from engines.strategy_deterministic_engine.adapters.trend_identifier_adapter imp
 )
 from engines.trend_identifier.trend_identifier.runners.equity_trend_history_runner import (  # noqa: E501
     EquityTrendHistoryRunner,
+    GOVERNED_EXPIRED_INDEX_SYMBOLS,
     TargetSessionNotFinalized,
 )
 
@@ -38,6 +40,7 @@ def main() -> None:
     symbols = TrendIdentifierKiteAdapter(kite=kite).get_fo_universe_symbols()
     try:
         catalog = NseFinalCloseProvider().fetch(run_date)
+        symbols = catalog.filter_current_universe(symbols)
     except NseFinalCloseUnavailable as exc:
         print(
             "FINALITY_READINESS=PENDING reason_code=NSE_FINAL_UNAVAILABLE "
@@ -50,6 +53,10 @@ def main() -> None:
     pending: list[str] = []
     try:
         for symbol in symbols:
+            contract = catalog.nearest_index_future(symbol)
+            if contract is not None and contract[0] < datetime.now(ZoneInfo("Asia/Kolkata")).date() and symbol in GOVERNED_EXPIRED_INDEX_SYMBOLS:
+                print(f"READINESS_DEFERRED_TO_COHERENT_ACQUISITION symbol={symbol} reason=expired_index_contract", flush=True)
+                continue
             try:
                 runner.check_target_session_finality(
                     symbol, run_date, catalog.resolve

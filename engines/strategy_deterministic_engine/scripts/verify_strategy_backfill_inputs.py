@@ -19,6 +19,8 @@ from engines.trend_identifier.trend_identifier.runners.equity_trend_history_runn
     TARGET_DATE_HISTORY_UNAVAILABLE,
     TARGET_INTRADAY_HISTORY_UNAVAILABLE,
     GOVERNED_TARGET_INTRADAY_UNAVAILABLE_SYMBOLS,
+    EXPIRED_CONTRACT_HISTORY_UNAVAILABLE,
+    GOVERNED_EXPIRED_INDEX_SYMBOLS,
 )
 
 
@@ -217,6 +219,33 @@ def validate_target_intraday_unavailable_exclusion(exclusion: dict, run_date: da
             raise RuntimeError("Intraday-unavailable exclusion contains target-session bars.")
 
 
+def validate_expired_contract_exclusion(exclusion: dict, run_date: date) -> None:
+    evidence = exclusion.get("evidence") or {}
+    instrument = exclusion.get("selected_instrument") or {}
+    symbol = exclusion.get("symbol")
+    try:
+        expiry = date.fromisoformat(evidence["expiry_date"])
+        observed = datetime.fromisoformat(evidence["observed_at"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError("Expired-contract exclusion lacks dated evidence.") from exc
+    month = "JAN FEB MAR APR MAY JUN JUL AUG SEP OCT NOV DEC".split()[expiry.month - 1]
+    if (exclusion.get("reason") != EXPIRED_CONTRACT_HISTORY_UNAVAILABLE
+        or exclusion.get("stage") != "TREND_PREPARATION"
+        or exclusion.get("target_date") != run_date.isoformat()
+        or symbol not in GOVERNED_EXPIRED_INDEX_SYMBOLS
+        or instrument.get("exchange") != "NFO"
+        or instrument.get("tradingsymbol") != f"{symbol}{expiry.year % 100:02d}{month}FUT"
+        or observed.tzinfo is None
+        or not (run_date <= expiry < observed.astimezone(ZoneInfo("Asia/Kolkata")).date())
+        or evidence.get("official_instrument_kind") != "IDF"
+        or evidence.get("complete_retained_window_available") is not False
+        or evidence.get("broker_expired_history_contract") != "CONTINUOUS_DAILY_ONLY"
+        or evidence.get("market_session_confirmation") != "PREPARED_PEER_TARGET_SESSION"
+        or not re.fullmatch(r"[0-9a-f]{64}", str(evidence.get("official_source_hash", "")))
+        or f"BhavCopy_NSE_FO_0_0_0_{run_date:%Y%m%d}_F_0000.csv.zip" not in str(evidence.get("official_source_name", ""))):
+        raise RuntimeError("Expired-contract exclusion is incomplete or outside the governed index scope.")
+
+
 def load_input_preparation_manifest(connection, run_date: date, user_id: str) -> dict:
     row = connection.execute(
         text(
@@ -271,6 +300,8 @@ def load_input_preparation_manifest(connection, run_date: date, user_id: str) ->
         if exclusion.get("stage") == "TREND_PREPARATION":
             if exclusion.get("reason") == NO_TRADING_ACTIVITY:
                 validate_no_trading_exclusion(exclusion, run_date)
+            elif exclusion.get("reason") == EXPIRED_CONTRACT_HISTORY_UNAVAILABLE:
+                validate_expired_contract_exclusion(exclusion, run_date)
             elif exclusion.get("reason") == TARGET_INTRADAY_HISTORY_UNAVAILABLE:
                 validate_target_intraday_unavailable_exclusion(exclusion, run_date)
             elif exclusion.get("reason") == TARGET_DATE_HISTORY_UNAVAILABLE:
@@ -447,6 +478,12 @@ def verify_inputs(
         ),
         "target_intraday_history_unavailable_symbols": sorted(
             str(item["symbol"]).upper() for item in preparation["exclusions"] if item["reason"] == TARGET_INTRADAY_HISTORY_UNAVAILABLE
+        ),
+        "expired_contract_history_unavailable_count": sum(
+            item["reason"] == EXPIRED_CONTRACT_HISTORY_UNAVAILABLE for item in preparation["exclusions"]
+        ),
+        "expired_contract_history_unavailable_symbols": sorted(
+            str(item["symbol"]).upper() for item in preparation["exclusions"] if item["reason"] == EXPIRED_CONTRACT_HISTORY_UNAVAILABLE
         ),
         "contract_snapshot_exact": True,
         "future_trend_rows_selected": 0,

@@ -57,6 +57,7 @@ from engines.strategy_deterministic_engine.scripts.verify_strategy_backfill_inpu
     validate_strategy_input_coverage,
     validate_target_date_unavailable_exclusion,
     validate_target_intraday_unavailable_exclusion,
+    validate_expired_contract_exclusion,
 )
 from engines.trend_identifier.trend_identifier.runners.equity_trend_history_runner import (
     CoherentHistoricalWindow,
@@ -66,12 +67,21 @@ from engines.trend_identifier.trend_identifier.runners.equity_trend_history_runn
     TargetDateHistoryUnavailableCandidate,
     TargetDateHistoryUnavailableEvidence,
     TargetIntradayHistoryUnavailableCandidate,
+    ExpiredContractHistoryUnavailableCandidate,
+    ExpiredContractHistoryUnavailableEvidence,
     TargetSessionNotFinalized,
     bars_content_hash,
 )
 from engines.trend_identifier.trend_identifier.runners.equity_trend_runner import (
     InstrumentMatch,
 )
+
+
+def mock_catalog_provider():
+    provider = MagicMock()
+    provider.fetch.return_value.filter_current_universe.side_effect = lambda symbols: list(symbols)
+    provider.fetch.return_value.nearest_index_future.return_value = None
+    return provider
 
 
 def trend_frame() -> pd.DataFrame:
@@ -1079,7 +1089,7 @@ class HistoricalBackfillContractTests(unittest.TestCase):
             sys,
             "argv",
             ["sync", "OMK569", "--end-date", "2026-09-08", "--strict"],
-        ), patch.object(trend_sync, "NseFinalCloseProvider"):
+        ), patch.object(trend_sync, "NseFinalCloseProvider", side_effect=mock_catalog_provider):
             trend_sync.main()
 
         persisted_rows = persist_preparation.call_args.args[1]
@@ -1115,7 +1125,7 @@ class HistoricalBackfillContractTests(unittest.TestCase):
             sys,
             "argv",
             ["sync", "OMK569", "--end-date", "2026-09-08", "--strict"],
-        ), patch.object(trend_sync, "NseFinalCloseProvider"):
+        ), patch.object(trend_sync, "NseFinalCloseProvider", side_effect=mock_catalog_provider):
             with redirect_stdout(output), self.assertRaises(SystemExit) as raised:
                 trend_sync.main()
         self.assertEqual(raised.exception.code, 1)
@@ -1156,7 +1166,7 @@ class HistoricalBackfillContractTests(unittest.TestCase):
             sys,
             "argv",
             ["sync", "XJ1877", "--end-date", "2026-09-08", "--strict"],
-        ), patch.object(trend_sync, "NseFinalCloseProvider"):
+        ), patch.object(trend_sync, "NseFinalCloseProvider", side_effect=mock_catalog_provider):
             with self.assertRaises(SystemExit) as raised:
                 trend_sync.main()
         self.assertEqual(raised.exception.code, 75)
@@ -1189,7 +1199,7 @@ class HistoricalBackfillContractTests(unittest.TestCase):
             sys,
             "argv",
             ["sync", "OMK569", "--end-date", "2026-09-08", "--strict"],
-        ), patch.object(trend_sync, "NseFinalCloseProvider"):
+        ), patch.object(trend_sync, "NseFinalCloseProvider", side_effect=mock_catalog_provider):
             with self.assertRaisesRegex(RuntimeError, "database unavailable"):
                 trend_sync.main()
 
@@ -1709,6 +1719,49 @@ class HistoricalContractSourceTests(unittest.TestCase):
         official = MagicMock()
         self.assertIsNone(runner.check_target_session_finality("NIFTYFPI", date(2026, 10, 22), official))
         official.assert_not_called()
+
+
+class ExpiredIndexExclusionTests(unittest.TestCase):
+    def candidate(self):
+        return ExpiredContractHistoryUnavailableCandidate(ExpiredContractHistoryUnavailableEvidence(
+            symbol="NIFTY", target_date=date(2026, 10, 23), exchange="NFO", tradingsymbol="NIFTY26OCTFUT",
+            expiry_date=date(2026, 10, 27), observed_at=datetime(2026, 10, 29, tzinfo=timezone.utc),
+            official_source_name="BhavCopy_NSE_FO_0_0_0_20261023_F_0000.csv.zip", official_source_hash="a" * 64,
+        ))
+
+    def test_approved_expired_index_gap_is_audited_without_invented_token_or_trend(self):
+        exclusion = build_strict_preparation_manifest(["ABC", "NIFTY"], {"ABC"}, [self.candidate()], end_date=date(2026, 10, 23))["exclusions"][0]
+        validate_expired_contract_exclusion(exclusion, date(2026, 10, 23))
+        self.assertNotIn("instrument_token", exclusion["selected_instrument"])
+        self.assertIs(exclusion["evidence"]["complete_retained_window_available"], False)
+
+    def test_scope_expiry_archive_and_retained_evidence_cannot_be_bypassed(self):
+        exclusion = build_strict_preparation_manifest(["ABC", "NIFTY"], {"ABC"}, [self.candidate()], end_date=date(2026, 10, 23))["exclusions"][0]
+        for section, key, value in [
+            (None, "symbol", "HDFCLIFE"), ("evidence", "expiry_date", "2026-11-24"),
+            ("evidence", "complete_retained_window_available", True), ("evidence", "official_source_hash", "missing"),
+            ("evidence", "official_source_name", "BhavCopy_NSE_FO_0_0_0_20261022_F_0000.csv.zip"),
+            ("selected_instrument", "tradingsymbol", "NIFTY26NOVFUT"),
+        ]:
+            invalid = deepcopy(exclusion)
+            (invalid[section] if section else invalid)[key] = value
+            with self.subTest(key=key), self.assertRaises(RuntimeError):
+                validate_expired_contract_exclusion(invalid, date(2026, 10, 23))
+
+    def test_missing_retained_window_excludes_only_the_expired_index(self):
+        with patch.object(trend_sync, "get_kite_credentials", return_value=("key", "token")), patch.object(trend_sync, "KiteConnect"), patch.object(trend_sync, "TrendIdentifierKiteAdapter") as adapter, patch.object(trend_sync, "NseFinalCloseProvider") as provider, patch.object(trend_sync, "EquityTrendHistoryRunner") as runner, patch.object(trend_sync, "get_engine", return_value=object()), patch.object(trend_sync, "load_finalized_source_window", return_value=None) as retained, patch.object(trend_sync, "persist_strict_trend_preparation") as persist:
+            adapter.return_value.get_fo_universe_symbols.return_value = ["ABC", "NIFTY"]
+            catalog = provider.return_value.fetch.return_value
+            catalog.filter_current_universe.side_effect = lambda symbols: list(symbols)
+            catalog.nearest_index_future.side_effect = lambda symbol: (date(2026, 9, 29), "NIFTY26SEPFUT") if symbol == "NIFTY" else None
+            catalog.source_name = "BhavCopy_NSE_FO_0_0_0_20260908_F_0000.csv.zip"
+            catalog.source_sha256 = "a" * 64
+            runner.return_value.build_history_for_symbol.return_value = strict_result()
+            with patch.object(sys, "argv", ["sync", "XJ1877", "--end-date", "2026-09-08", "--strict"]), redirect_stdout(io.StringIO()):
+                trend_sync.main()
+            self.assertEqual(runner.return_value.build_history_for_symbol.call_count, 1)
+            self.assertEqual(persist.call_args.kwargs["exclusions"][0]["reason"], "EXPIRED_CONTRACT_HISTORY_UNAVAILABLE")
+            self.assertEqual(retained.call_args.args[1:], ("XJ1877", "NIFTY", date(2026, 9, 8), "NIFTY26SEPFUT"))
 
 
 if __name__ == "__main__":

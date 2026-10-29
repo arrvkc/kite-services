@@ -348,5 +348,21 @@ class HistoricalExpiryCatalogTests(unittest.TestCase):
             catalog.monthly_futures_expiries("ICICILIFE")
 
 
+class HistoricalMembershipTests(unittest.TestCase):
+    def test_later_listings_are_removed_and_historical_members_must_map(self):
+        catalog = RenamedInstrumentFinalCloseTests().catalog(date(2026, 10, 22), ["ICICIPRULI26OCTFUT"], segment="FO")
+        catalog._rows_by_segment["FO"][0].update(TckrSymb="ICICIPRULI", XpryDt="2026-10-27")
+        self.assertEqual(catalog.filter_current_universe(["ICICILIFE", "NEWCO"]), ["ICICILIFE"])
+        self.assertIsNone(catalog.nearest_index_future("ICICILIFE"))
+        for symbols in [["NEWCO"], ["ICICILIFE", "ICICIPRULI"]]:
+            with self.assertRaises(NseFinalCloseIdentityError):
+                catalog.filter_current_universe(symbols)
+
+    def test_index_near_contract_comes_from_the_target_archive(self):
+        catalog = RenamedInstrumentFinalCloseTests().catalog(date(2026, 10, 22), ["NIFTY26OCTFUT"], segment="FO")
+        catalog._rows_by_segment["FO"][0].update(TckrSymb="NIFTY", FinInstrmTp="IDF", XpryDt="2026-10-27")
+        self.assertEqual(catalog.nearest_index_future("NIFTY"), (date(2026, 10, 27), "NIFTY26OCTFUT"))
+
+
 if __name__ == "__main__":
     unittest.main()

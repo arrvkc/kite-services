@@ -4,7 +4,8 @@ import argparse
 import hashlib
 import json
 import math
-from datetime import date
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
 from types import SimpleNamespace
 from typing import Any
 import uuid
@@ -23,10 +24,14 @@ from engines.trend_identifier.trend_identifier.runners.equity_trend_history_runn
     NoTradingActivityCandidate,
     TargetDateHistoryUnavailableCandidate,
     TargetIntradayHistoryUnavailableCandidate,
+    ExpiredContractHistoryUnavailableCandidate,
+    ExpiredContractHistoryUnavailableEvidence,
+    GOVERNED_EXPIRED_INDEX_SYMBOLS,
     TargetSessionNotFinalized,
     canonical_bars,
 )
 from engines.strategy_deterministic_engine.db.postgres import get_engine
+from engines.strategy_deterministic_engine.db.historical_windows import load_finalized_source_window
 from engines.strategy_deterministic_engine.db.upserts import (
     historical_snapshot_manifest_hash,
     persist_strict_trend_preparation,
@@ -122,7 +127,25 @@ def target_date_unavailable_exclusion(
     return result
 
 
+def expired_contract_exclusion(candidate) -> dict:
+    evidence = candidate.evidence
+    return {
+        "symbol": evidence.symbol, "reason": candidate.reason, "stage": "TREND_PREPARATION",
+        "target_date": evidence.target_date.isoformat(),
+        "selected_instrument": {"exchange": evidence.exchange, "tradingsymbol": evidence.tradingsymbol},
+        "evidence": {
+            "expiry_date": evidence.expiry_date.isoformat(), "observed_at": evidence.observed_at.isoformat(),
+            "official_source_name": evidence.official_source_name, "official_source_hash": evidence.official_source_hash,
+            "official_instrument_kind": "IDF", "complete_retained_window_available": False,
+            "broker_expired_history_contract": "CONTINUOUS_DAILY_ONLY",
+            "market_session_confirmation": "PREPARED_PEER_TARGET_SESSION",
+        },
+    }
+
+
 def preparation_exclusion(candidate) -> dict:
+    if isinstance(candidate, ExpiredContractHistoryUnavailableCandidate):
+        return expired_contract_exclusion(candidate)
     if isinstance(candidate, NoTradingActivityCandidate):
         return no_trading_exclusion(candidate)
     if isinstance(candidate, TargetDateHistoryUnavailableCandidate):
@@ -140,7 +163,7 @@ def build_strict_preparation_manifest(
     requested_symbols: list[str],
     prepared_symbols: set[str],
     candidates: list[
-        NoTradingActivityCandidate | TargetDateHistoryUnavailableCandidate
+        NoTradingActivityCandidate | TargetDateHistoryUnavailableCandidate | ExpiredContractHistoryUnavailableCandidate
     ],
     *,
     end_date: date,
@@ -173,6 +196,9 @@ def build_strict_preparation_manifest(
                 "Target-date-unavailable evidence did not satisfy the strict contract."
             )
     for candidate in candidates:
+        if isinstance(candidate, ExpiredContractHistoryUnavailableCandidate):
+            from engines.strategy_deterministic_engine.scripts.verify_strategy_backfill_inputs import validate_expired_contract_exclusion
+            validate_expired_contract_exclusion(preparation_exclusion(candidate), end_date)
         if isinstance(candidate, TargetIntradayHistoryUnavailableCandidate):
             from engines.strategy_deterministic_engine.scripts.verify_strategy_backfill_inputs import validate_target_intraday_unavailable_exclusion
             validate_target_intraday_unavailable_exclusion(preparation_exclusion(candidate), end_date)
@@ -519,9 +545,13 @@ def main() -> None:
 
     history_runner = EquityTrendHistoryRunner(kite=kite, exchange="NSE")
     final_close_resolver = None
+    catalog = None
     if end_date is not None:
         try:
-            final_close_resolver = NseFinalCloseProvider().fetch(end_date).resolve
+            catalog = NseFinalCloseProvider().fetch(end_date)
+            final_close_resolver = catalog.resolve
+            if not args.symbols:
+                symbols = catalog.filter_current_universe(symbols)
         except NseFinalCloseUnavailable as exc:
             unavailable_message = str(exc)
 
@@ -531,10 +561,11 @@ def main() -> None:
             final_close_resolver = unavailable_final_close
 
     engine = None if args.dry_run else get_engine()
+    cache_engine = engine
     total_rows = 0
     failures: list[dict] = []
     exclusion_candidates: list[
-        NoTradingActivityCandidate | TargetDateHistoryUnavailableCandidate
+        NoTradingActivityCandidate | TargetDateHistoryUnavailableCandidate | ExpiredContractHistoryUnavailableCandidate
     ] = []
     strict_rows: list[dict] = []
     prepared_symbols: set[str] = set()
@@ -547,11 +578,29 @@ def main() -> None:
 
     for index, symbol in enumerate(symbols, start=1):
         try:
+            archived_window = None
+            historical_contract = catalog.nearest_index_future(symbol) if catalog is not None else None
+            if historical_contract is not None:
+                expiry, contract = historical_contract
+                observed = datetime.now(ZoneInfo("Asia/Kolkata"))
+                if expiry < observed.date():
+                    if symbol not in GOVERNED_EXPIRED_INDEX_SYMBOLS:
+                        raise RuntimeError("Expired index recovery is outside the governed scope.")
+                    cache_engine = cache_engine or get_engine()
+                    archived_window = load_finalized_source_window(cache_engine, args.user_id, symbol, end_date, contract)
+                    if archived_window is None:
+                        raise ExpiredContractHistoryUnavailableCandidate(ExpiredContractHistoryUnavailableEvidence(
+                            symbol=symbol, target_date=end_date, exchange="NFO", tradingsymbol=contract,
+                            expiry_date=expiry, observed_at=observed,
+                            official_source_name=catalog.source_name, official_source_hash=catalog.source_sha256,
+                        ))
+                    print(f"REUSED_FINALIZED_WINDOW symbol={symbol} run_date={end_date} contract={contract}", flush=True)
             result = history_runner.build_history_for_symbol(
                 symbol=symbol,
                 history_days=args.history_days,
                 end_date=end_date,
                 final_close_resolver=final_close_resolver,
+                source_window=archived_window,
             )
 
             symbol_rows = build_symbol_rows(args, result)
@@ -616,6 +665,12 @@ def main() -> None:
                 f"{exception_type}: {message}",
                 flush=True,
             )
+        except ExpiredContractHistoryUnavailableCandidate as exc:
+            if args.strict and end_date is not None:
+                exclusion_candidates.append(exc)
+                print(f"[{index}/{len(symbols)}] EXCLUDED {symbol}: {exc.reason}", flush=True)
+            else:
+                failures.append({"symbol": symbol, "type": type(exc).__name__, "message": str(exc)})
         except NoTradingActivityCandidate as exc:
             if args.strict and end_date is not None:
                 exclusion_candidates.append(exc)
@@ -810,6 +865,9 @@ def main() -> None:
         )
         print("TARGET_INTRADAY_HISTORY_UNAVAILABLE_SYMBOLS=" + (
             ",".join(sorted(item.evidence.symbol for item in exclusion_candidates if isinstance(item, TargetIntradayHistoryUnavailableCandidate))) or "NONE"
+        ))
+        print("EXPIRED_CONTRACT_HISTORY_UNAVAILABLE_SYMBOLS=" + (
+            ",".join(sorted(item.evidence.symbol for item in exclusion_candidates if isinstance(item, ExpiredContractHistoryUnavailableCandidate))) or "NONE"
         ))
         print("FAILURES count=0")
     else:
