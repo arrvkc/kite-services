@@ -551,7 +551,7 @@ def main() -> None:
             catalog = NseFinalCloseProvider().fetch(end_date)
             final_close_resolver = catalog.resolve
             if not args.symbols:
-                symbols = catalog.filter_current_universe(symbols)
+                symbols = catalog.filter_current_universe(symbols, adapter._get_nse_equity_symbols())
         except NseFinalCloseUnavailable as exc:
             unavailable_message = str(exc)
 

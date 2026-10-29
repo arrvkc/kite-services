@@ -215,12 +215,19 @@ class NseFinalCloseCatalog:
         )
         return hashlib.sha256(material.encode("ascii")).hexdigest()
 
-    def filter_current_universe(self, current_symbols: list[str]) -> list[str]:
+    def filter_current_universe(self, current_symbols: list[str], available_cash_symbols=()) -> list[str]:
         """Use archive membership, requiring a current broker identity for each member."""
         historical = {row["TckrSymb"].strip().upper() for row in self._rows_by_segment["FO"]
                       if row["FinInstrmTp"].strip().upper() in {"IDF", "STF"}}
         current = {official_symbol_for_session(symbol, self.session_date): symbol for symbol in current_symbols}
-        if len(current) != len(current_symbols) or not historical or historical - current.keys():
+        if len(current) != len(current_symbols):
+            raise NseFinalCloseIdentityError("Historical futures membership has ambiguous broker aliases.")
+        # An underlying can remain a listed cash equity after its futures stop
+        # trading. Historical membership must not drop that still-readable stock.
+        for symbol in sorted(available_cash_symbols):
+            historical_symbol = official_symbol_for_session(symbol, self.session_date)
+            current.setdefault(historical_symbol, symbol)
+        if not historical or historical - current.keys():
             raise NseFinalCloseIdentityError("Historical futures membership cannot be mapped exactly to broker identities.")
         return sorted(current[symbol] for symbol in historical)
 

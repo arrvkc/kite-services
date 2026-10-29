@@ -354,6 +354,7 @@ class HistoricalMembershipTests(unittest.TestCase):
         catalog._rows_by_segment["FO"][0].update(TckrSymb="ICICIPRULI", XpryDt="2026-10-27")
         self.assertEqual(catalog.filter_current_universe(["ICICILIFE", "NEWCO"]), ["ICICILIFE"])
         self.assertIsNone(catalog.nearest_index_future("ICICILIFE"))
+        self.assertEqual(catalog.filter_current_universe(["NEWCO"], {"ICICILIFE"}), ["ICICILIFE"])
         for symbols in [["NEWCO"], ["ICICILIFE", "ICICIPRULI"]]:
             with self.assertRaises(NseFinalCloseIdentityError):
                 catalog.filter_current_universe(symbols)

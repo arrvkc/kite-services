@@ -37,10 +37,11 @@ def main() -> None:
     api_key, access_token = get_kite_credentials(args.user_id)
     kite = KiteConnect(api_key=api_key)
     kite.set_access_token(access_token)
-    symbols = TrendIdentifierKiteAdapter(kite=kite).get_fo_universe_symbols()
+    adapter = TrendIdentifierKiteAdapter(kite=kite)
+    symbols = adapter.get_fo_universe_symbols()
     try:
         catalog = NseFinalCloseProvider().fetch(run_date)
-        symbols = catalog.filter_current_universe(symbols)
+        symbols = catalog.filter_current_universe(symbols, adapter._get_nse_equity_symbols())
     except NseFinalCloseUnavailable as exc:
         print(
             "FINALITY_READINESS=PENDING reason_code=NSE_FINAL_UNAVAILABLE "

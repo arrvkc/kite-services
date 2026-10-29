@@ -37,7 +37,7 @@ class StrategyFinalityReadinessTests(unittest.TestCase):
             runner.assert_not_called()
 
             provider.return_value.fetch.side_effect = None
-            provider.return_value.fetch.return_value.filter_current_universe.side_effect = lambda symbols: list(symbols)
+            provider.return_value.fetch.return_value.filter_current_universe.side_effect = lambda symbols, *_cash: list(symbols)
             provider.return_value.fetch.return_value.nearest_index_future.return_value = None
             ready_output = io.StringIO()
             with redirect_stdout(ready_output):

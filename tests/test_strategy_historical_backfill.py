@@ -79,7 +79,7 @@ from engines.trend_identifier.trend_identifier.runners.equity_trend_runner impor
 
 def mock_catalog_provider():
     provider = MagicMock()
-    provider.fetch.return_value.filter_current_universe.side_effect = lambda symbols: list(symbols)
+    provider.fetch.return_value.filter_current_universe.side_effect = lambda symbols, *_cash: list(symbols)
     provider.fetch.return_value.nearest_index_future.return_value = None
     return provider
 
@@ -1752,7 +1752,7 @@ class ExpiredIndexExclusionTests(unittest.TestCase):
         with patch.object(trend_sync, "get_kite_credentials", return_value=("key", "token")), patch.object(trend_sync, "KiteConnect"), patch.object(trend_sync, "TrendIdentifierKiteAdapter") as adapter, patch.object(trend_sync, "NseFinalCloseProvider") as provider, patch.object(trend_sync, "EquityTrendHistoryRunner") as runner, patch.object(trend_sync, "get_engine", return_value=object()), patch.object(trend_sync, "load_finalized_source_window", return_value=None) as retained, patch.object(trend_sync, "persist_strict_trend_preparation") as persist:
             adapter.return_value.get_fo_universe_symbols.return_value = ["ABC", "NIFTY"]
             catalog = provider.return_value.fetch.return_value
-            catalog.filter_current_universe.side_effect = lambda symbols: list(symbols)
+            catalog.filter_current_universe.side_effect = lambda symbols, *_cash: list(symbols)
             catalog.nearest_index_future.side_effect = lambda symbol: (date(2026, 9, 29), "NIFTY26SEPFUT") if symbol == "NIFTY" else None
             catalog.source_name = "BhavCopy_NSE_FO_0_0_0_20260908_F_0000.csv.zip"
             catalog.source_sha256 = "a" * 64
