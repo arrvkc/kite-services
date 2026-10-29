@@ -14,6 +14,7 @@ from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 import hashlib
 import io
+import re
 import socket
 import sys
 import zipfile
@@ -43,6 +44,21 @@ _REQUIRED_COLUMNS = {
     "FinInstrmNm",
     "ClsPric",
 }
+
+
+def official_symbol_for_session(symbol: str, session_date: date) -> str:
+    """Resolve only exchange-documented renames at their effective date.
+
+    NSE/CML/76967 and NSE/FAOP/77013: ICICIPRULI -> ICICILIFE,
+    effective 2026-10-23. No fuzzy or fallback matching is permitted.
+    https://nsearchives.nseindia.com/content/circulars/CML76967.pdf
+    https://nsearchives.nseindia.com/content/circulars/FAOP77013.pdf
+    """
+    match = re.fullmatch(r"(ICICIPRULI|ICICILIFE)([0-9]{2}[A-Z]{3}FUT)?", symbol)
+    if match is None:
+        return symbol
+    underlying = "ICICIPRULI" if session_date < date(2026, 10, 23) else "ICICILIFE"
+    return underlying + (match.group(2) or "")
 
 
 def _create_ipv4_connection(
@@ -199,6 +215,28 @@ class NseFinalCloseCatalog:
         )
         return hashlib.sha256(material.encode("ascii")).hexdigest()
 
+    def monthly_futures_expiries(self, symbol: str) -> list[date]:
+        """Recover contracts listed in the exact session, including expired ones."""
+        archive_symbol = official_symbol_for_session(symbol.strip().upper(), self.session_date)
+        rows = [row for row in self._rows_by_segment["FO"]
+                if row["TckrSymb"].strip().upper() == archive_symbol
+                and row["FinInstrmTp"].strip().upper() in {"IDF", "STF"}]
+        expiries = []
+        for row in rows:
+            try:
+                expiry = date.fromisoformat(row["XpryDt"].strip())
+            except (KeyError, ValueError) as exc:
+                raise NseFinalCloseIdentityError("Official historical futures expiry is invalid.") from exc
+            month = "JAN FEB MAR APR MAY JUN JUL AUG SEP OCT NOV DEC".split()[expiry.month - 1]
+            expected_name = f"{archive_symbol}{expiry.year % 100:02d}{month}FUT"
+            if row["FinInstrmNm"].strip().upper() != expected_name:
+                raise NseFinalCloseIdentityError("Official historical monthly contract identity is ambiguous.")
+            if expiry >= self.session_date:
+                expiries.append(expiry)
+        if not expiries or len(expiries) != len(set(expiries)):
+            raise NseFinalCloseIdentityError("Official historical monthly contracts are missing or ambiguous.")
+        return sorted(expiries)
+
     def resolve(self, instrument: dict, target_date: date) -> OfficialFinalCloseEvidence:
         if target_date != self.session_date:
             raise NseFinalCloseIdentityError(
@@ -208,6 +246,7 @@ class NseFinalCloseCatalog:
         tradingsymbol = str(
             instrument.get("resolved_tradingsymbol") or ""
         ).strip().upper()
+        archive_symbol = official_symbol_for_session(tradingsymbol, target_date)
         instrument_type = str(
             instrument.get("kite_instrument_type") or ""
         ).strip().upper()
@@ -216,7 +255,7 @@ class NseFinalCloseCatalog:
             matches = [
                 row
                 for row in self._rows_by_segment[segment]
-                if row["TckrSymb"].strip().upper() == tradingsymbol
+                if row["TckrSymb"].strip().upper() == archive_symbol
                 and row["SctySrs"].strip().upper() == "EQ"
                 and row["FinInstrmTp"].strip().upper() == "STK"
             ]
@@ -226,7 +265,7 @@ class NseFinalCloseCatalog:
             matches = [
                 row
                 for row in self._rows_by_segment[segment]
-                if row["FinInstrmNm"].strip().upper() == tradingsymbol
+                if row["FinInstrmNm"].strip().upper() == archive_symbol
                 and row["FinInstrmTp"].strip().upper() in {"IDF", "STF"}
             ]
             kind = "NSE_FO_FUT_FINAL"
@@ -243,7 +282,7 @@ class NseFinalCloseCatalog:
         return OfficialFinalCloseEvidence(
             session_date=target_date,
             exchange=exchange,
-            tradingsymbol=tradingsymbol,
+            tradingsymbol=archive_symbol,
             instrument_kind=kind,
             close=_decimal(row["ClsPric"], field="close"),
             source_name=self._archive_names[segment],

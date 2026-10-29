@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, datetime, timezone
 from decimal import Decimal
 import io
 import socket
@@ -11,6 +11,8 @@ import requests
 from services.nse_final_close import (
     NSE_ARCHIVE_ROOT,
     NseFinalCloseIdentityError,
+    NseFinalCloseCatalog,
+    official_symbol_for_session,
     NseFinalCloseNotPublished,
     NseFinalCloseProvider,
     NseFinalCloseUnavailable,
@@ -277,6 +279,73 @@ class NseFinalCloseTests(unittest.TestCase):
     def test_close_comparison_uses_published_decimal_precision(self):
         self.assertTrue(closes_match(398.1, Decimal("398.10")))
         self.assertFalse(closes_match(398.15, Decimal("398.10")))
+
+
+class RenamedInstrumentFinalCloseTests(unittest.TestCase):
+    def catalog(self, target, symbols, *, segment="CM"):
+        return NseFinalCloseCatalog(
+            session_date=target,
+            rows_by_segment={segment: [
+                {"TckrSymb": symbol, "SctySrs": "EQ", "FinInstrmTp": "STK" if segment == "CM" else "STF",
+                 "FinInstrmNm": symbol, "ClsPric": "600.10"}
+                for symbol in symbols
+            ]},
+            archive_hashes={segment: "a" * 64},
+            archive_names={segment: "official-final.zip"},
+            retrieved_at=datetime(2026, 10, 29, tzinfo=timezone.utc),
+        )
+
+    def test_effective_date_and_both_symbol_directions(self):
+        for target, expected in [(date(2026, 10, 22), "ICICIPRULI"), (date(2026, 10, 23), "ICICILIFE")]:
+            for requested in ["ICICILIFE", "ICICIPRULI"]:
+                with self.subTest(target=target, requested=requested):
+                    evidence = self.catalog(target, [expected]).resolve(
+                        {"resolved_exchange": "NSE", "resolved_tradingsymbol": requested, "kite_instrument_type": "EQ"}, target
+                    )
+                    self.assertEqual(evidence.tradingsymbol, expected)
+                    self.assertEqual(evidence.close, Decimal("600.10"))
+                    self.assertEqual(evidence.source_sha256, "a" * 64)
+
+    def test_derivative_contract_suffix_is_preserved(self):
+        target = date(2026, 10, 22)
+        evidence = self.catalog(target, ["ICICIPRULI26OCTFUT"], segment="FO").resolve(
+            {"resolved_exchange": "NFO", "resolved_tradingsymbol": "ICICILIFE26OCTFUT", "kite_instrument_type": "FUT"}, target
+        )
+        self.assertEqual(evidence.tradingsymbol, "ICICIPRULI26OCTFUT")
+
+    def test_wrong_date_name_and_duplicate_remain_rejected(self):
+        target = date(2026, 10, 22)
+        instrument = {"resolved_exchange": "NSE", "resolved_tradingsymbol": "ICICILIFE", "kite_instrument_type": "EQ"}
+        for symbols in [["ICICILIFE"], ["ICICIPRULI", "ICICIPRULI"], ["UNRELATED"]]:
+            with self.subTest(symbols=symbols), self.assertRaises(NseFinalCloseIdentityError):
+                self.catalog(target, symbols).resolve(instrument, target)
+
+    def test_no_prefix_or_fuzzy_matching(self):
+        for symbol in ["ICICILIFEOTHER", "ICICILIFE26OCT600CE", "ICICIBANK"]:
+            self.assertEqual(official_symbol_for_session(symbol, date(2026, 10, 22)), symbol)
+
+
+class HistoricalExpiryCatalogTests(unittest.TestCase):
+    catalog = RenamedInstrumentFinalCloseTests.catalog
+
+    def test_expired_contracts_are_retained_for_the_historical_session(self):
+        target = date(2026, 10, 22)
+        catalog = self.catalog(target, ["ICICIPRULI26OCTFUT", "ICICIPRULI26NOVFUT"], segment="FO")
+        for row, expiry in zip(catalog._rows_by_segment["FO"], ["2026-10-27", "2026-11-24"]):
+            row["TckrSymb"] = "ICICIPRULI"
+            row["XpryDt"] = expiry
+        self.assertEqual(catalog.monthly_futures_expiries("ICICILIFE"), [date(2026, 10, 27), date(2026, 11, 24)])
+        catalog._rows_by_segment["FO"].append(catalog._rows_by_segment["FO"][0].copy())
+        with self.assertRaises(NseFinalCloseIdentityError):
+            catalog.monthly_futures_expiries("ICICILIFE")
+
+    def test_mismatched_monthly_name_does_not_invent_an_expiry(self):
+        target = date(2026, 10, 22)
+        catalog = self.catalog(target, ["ICICIPRULI26NOVFUT"], segment="FO")
+        row = catalog._rows_by_segment["FO"][0]
+        row.update(TckrSymb="ICICIPRULI", XpryDt="2026-10-27")
+        with self.assertRaises(NseFinalCloseIdentityError):
+            catalog.monthly_futures_expiries("ICICILIFE")
 
 
 if __name__ == "__main__":

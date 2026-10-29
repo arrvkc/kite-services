@@ -23,6 +23,8 @@ from .equity_trend_runner import EquityTrendRunner
 
 NO_TRADING_ACTIVITY = "NO_TRADING_ACTIVITY"
 TARGET_DATE_HISTORY_UNAVAILABLE = "TARGET_DATE_HISTORY_UNAVAILABLE"
+TARGET_INTRADAY_HISTORY_UNAVAILABLE = "TARGET_INTRADAY_HISTORY_UNAVAILABLE"
+GOVERNED_TARGET_INTRADAY_UNAVAILABLE_SYMBOLS = frozenset({"NIFTYFPI"})
 # This is deliberately symbol-scoped. Missing target bars for any other symbol
 # remain an unexpected fatal error until separately governed with evidence.
 GOVERNED_TARGET_DATE_UNAVAILABLE_SYMBOLS = frozenset({"NIFTYFPI"})
@@ -175,6 +177,30 @@ class TargetDateHistoryUnavailableCandidate(RuntimeError):
         )
 
 
+@dataclass(frozen=True)
+class TargetIntradayHistoryUnavailableEvidence(TargetDateHistoryUnavailableEvidence):
+    daily_close: object
+    daily_volume: object
+    daily_content_hash: str
+    hourly_content_hash: str
+    daily_series: str
+
+
+class TargetIntradayHistoryUnavailableCandidate(TargetDateHistoryUnavailableCandidate):
+    """A governed index has a continuous daily bar but no target hourly bars.
+
+    Continuous futures daily bars describe the front-month series and are not
+    interchangeable with the selected live contract's non-continuous hourly
+    history. Record unavailability; never fabricate a Trend from that gap.
+    """
+
+    reason = TARGET_INTRADAY_HISTORY_UNAVAILABLE
+
+    def __init__(self, evidence: TargetIntradayHistoryUnavailableEvidence) -> None:
+        self.evidence = evidence
+        RuntimeError.__init__(self, f"{evidence.symbol} has a daily observation but no target-session intraday history on {evidence.target_date}.")
+
+
 class EquityTrendHistoryRunner:
     """
     Reusable runner that builds a daily history of Trend Identifier outputs
@@ -245,6 +271,21 @@ class EquityTrendHistoryRunner:
                 f"{normalized_symbol} target session {target_date} does not "
                 "have one daily candle."
             )
+        if (
+            normalized_symbol in GOVERNED_TARGET_INTRADAY_UNAVAILABLE_SYMBOLS
+            and instrument.exchange.upper() == "NFO"
+            and instrument.instrument_type.upper() == "FUT"
+            and target.iloc[0].get("volume", 0) > 0
+            and datetime.now(ZoneInfo("Asia/Kolkata")).date() > target_date
+        ):
+            intraday = self.equity_runner.fetch_historical_data(
+                instrument_token=instrument.instrument_token, from_dt=from_dt,
+                to_dt=to_dt, interval="60minute", oi=False, continuous=False,
+            )
+            if intraday.empty:
+                # Readiness is only a preflight. The coherent acquisition must
+                # retain source hashes and validate the governed exclusion.
+                return None
         metadata = {
             "resolved_exchange": instrument.exchange,
             "resolved_tradingsymbol": instrument.tradingsymbol,
@@ -339,6 +380,34 @@ class EquityTrendHistoryRunner:
                 ]
             else:
                 target_daily = daily
+            retrieved_local = retrieved_at.astimezone(ZoneInfo("Asia/Kolkata"))
+            if (
+                finality_required
+                and symbol.strip().upper() in GOVERNED_TARGET_INTRADAY_UNAVAILABLE_SYMBOLS
+                and instrument_metadata.get("resolved_exchange") == "NFO"
+                and instrument_metadata.get("kite_instrument_type") == "FUT"
+                and target_hourly.empty
+                and len(target_daily.index) == 1
+                and retrieved_local.date() > target_date
+                and target_daily.iloc[0].get("volume", 0) > 0
+            ):
+                row = target_daily.iloc[0]
+                raise TargetIntradayHistoryUnavailableCandidate(
+                    TargetIntradayHistoryUnavailableEvidence(
+                        symbol=symbol.strip().upper(), target_date=target_date,
+                        exchange=str(instrument_metadata["resolved_exchange"]),
+                        tradingsymbol=str(instrument_metadata["resolved_tradingsymbol"]),
+                        instrument_token=int(instrument_metadata["instrument_token"]),
+                        required_interval="60minute", target_daily_candle_count=1,
+                        target_intraday_candle_count=0,
+                        latest_daily_timestamp=pd.Timestamp(row["timestamp"]).isoformat(),
+                        latest_intraday_timestamp=(pd.Timestamp(hourly["timestamp"].max()).isoformat() if not hourly.empty else "-"),
+                        daily_close=row.get("close"), daily_volume=row.get("volume"),
+                        daily_content_hash=bars_content_hash(raw_bars["daily"]),
+                        hourly_content_hash=bars_content_hash(raw_bars["hourly"]),
+                        daily_series="CONTINUOUS_FRONT_MONTH",
+                    )
+                )
             if target_hourly.empty and len(target_daily.index) == 1:
                 daily_row = target_daily.iloc[0]
                 if daily_row.get("volume") == 0:

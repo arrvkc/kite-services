@@ -185,12 +185,16 @@ class TrendIdentifierKiteAdapter:
                 count += 1
         return count
 
-    def get_contract_info_for_symbol(self, symbol: str, asof_time: object) -> FOSymbolContractInfo:
+    def get_contract_info_for_symbol(self, symbol: str, asof_time: object, *, official_catalog=None) -> FOSymbolContractInfo:
         symbol = symbol.upper()
-        fut = self._monthly_futures_for_symbol(symbol)
         selection_day = self._selection_date_from_asof(asof_time)
-
-        unique_expiries = sorted({d for d in fut["expiry"].tolist() if d >= selection_day})
+        if official_catalog is not None:
+            if official_catalog.session_date != selection_day:
+                raise TrendIdentifierAdapterError("Historical contract archive date does not match selection date.")
+            unique_expiries = official_catalog.monthly_futures_expiries(symbol)
+        else:
+            fut = self._monthly_futures_for_symbol(symbol)
+            unique_expiries = sorted({d for d in fut["expiry"].tolist() if d >= selection_day})
         if not unique_expiries:
             raise TrendIdentifierAdapterError(
                 f"No current or future monthly expiries found for {symbol}"

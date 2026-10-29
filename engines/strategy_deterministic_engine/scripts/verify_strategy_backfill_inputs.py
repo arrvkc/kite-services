@@ -5,6 +5,7 @@ from collections import Counter, defaultdict
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 import json
+import re
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import text
@@ -16,6 +17,8 @@ from engines.strategy_deterministic_engine.db.postgres import get_engine
 from engines.trend_identifier.trend_identifier.runners.equity_trend_history_runner import (
     GOVERNED_TARGET_DATE_UNAVAILABLE_SYMBOLS,
     TARGET_DATE_HISTORY_UNAVAILABLE,
+    TARGET_INTRADAY_HISTORY_UNAVAILABLE,
+    GOVERNED_TARGET_INTRADAY_UNAVAILABLE_SYMBOLS,
 )
 
 
@@ -172,6 +175,48 @@ def validate_target_date_unavailable_exclusion(
         )
 
 
+def validate_target_intraday_unavailable_exclusion(exclusion: dict, run_date: date) -> None:
+    """Only the documented NIFTYFPI broker coverage gap may be excluded."""
+    evidence = exclusion.get("evidence") or {}
+    instrument = exclusion.get("selected_instrument") or {}
+    symbol = exclusion.get("symbol")
+    try:
+        daily = datetime.fromisoformat(evidence["latest_daily_timestamp"])
+        volume = Decimal(str(evidence["daily_volume"]))
+        close = Decimal(str(evidence["daily_close"]))
+        token = int(instrument.get("instrument_token", 0))
+    except (KeyError, TypeError, ValueError, InvalidOperation) as exc:
+        raise RuntimeError("Intraday-unavailable evidence is invalid.") from exc
+    if (
+        exclusion.get("reason") != TARGET_INTRADAY_HISTORY_UNAVAILABLE
+        or exclusion.get("stage") != "TREND_PREPARATION"
+        or exclusion.get("target_date") != run_date.isoformat()
+        or symbol not in GOVERNED_TARGET_INTRADAY_UNAVAILABLE_SYMBOLS
+        or instrument.get("exchange") != "NFO"
+        or not re.fullmatch(r"NIFTYFPI[0-9]{2}[A-Z]{3}FUT", str(instrument.get("tradingsymbol", "")))
+        or token <= 0
+        or daily.tzinfo is None
+        or daily.astimezone(ZoneInfo("Asia/Kolkata")).date() != run_date
+        or not volume.is_finite() or volume <= 0
+        or not close.is_finite() or close <= 0
+        or evidence.get("target_daily_candle_count") != 1
+        or evidence.get("target_intraday_candle_count") != 0
+        or evidence.get("required_interval") != "60minute"
+        or evidence.get("daily_series") != "CONTINUOUS_FRONT_MONTH"
+        or evidence.get("market_session_confirmation") != "PREPARED_PEER_TARGET_SESSION"
+        or any(not re.fullmatch(r"[0-9a-f]{64}", str(evidence.get(key, ""))) for key in ["daily_content_hash", "hourly_content_hash"])
+    ):
+        raise RuntimeError("Intraday-unavailable evidence is incomplete or not governed.")
+    latest_hourly = evidence.get("latest_intraday_timestamp")
+    if latest_hourly != "-":
+        try:
+            hourly = datetime.fromisoformat(str(latest_hourly))
+        except ValueError as exc:
+            raise RuntimeError("Intraday-unavailable prior history is invalid.") from exc
+        if hourly.tzinfo is None or hourly.astimezone(ZoneInfo("Asia/Kolkata")).date() >= run_date:
+            raise RuntimeError("Intraday-unavailable exclusion contains target-session bars.")
+
+
 def load_input_preparation_manifest(connection, run_date: date, user_id: str) -> dict:
     row = connection.execute(
         text(
@@ -226,6 +271,8 @@ def load_input_preparation_manifest(connection, run_date: date, user_id: str) ->
         if exclusion.get("stage") == "TREND_PREPARATION":
             if exclusion.get("reason") == NO_TRADING_ACTIVITY:
                 validate_no_trading_exclusion(exclusion, run_date)
+            elif exclusion.get("reason") == TARGET_INTRADAY_HISTORY_UNAVAILABLE:
+                validate_target_intraday_unavailable_exclusion(exclusion, run_date)
             elif exclusion.get("reason") == TARGET_DATE_HISTORY_UNAVAILABLE:
                 validate_target_date_unavailable_exclusion(exclusion, run_date)
             else:
@@ -394,6 +441,12 @@ def verify_inputs(
             str(item["symbol"]).upper()
             for item in preparation["exclusions"]
             if item["reason"] == TARGET_DATE_HISTORY_UNAVAILABLE
+        ),
+        "target_intraday_history_unavailable_count": sum(
+            item["reason"] == TARGET_INTRADAY_HISTORY_UNAVAILABLE for item in preparation["exclusions"]
+        ),
+        "target_intraday_history_unavailable_symbols": sorted(
+            str(item["symbol"]).upper() for item in preparation["exclusions"] if item["reason"] == TARGET_INTRADAY_HISTORY_UNAVAILABLE
         ),
         "contract_snapshot_exact": True,
         "future_trend_rows_selected": 0,

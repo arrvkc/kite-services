@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from copy import deepcopy
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from contextlib import redirect_stdout
@@ -55,6 +56,7 @@ from engines.strategy_deterministic_engine.scripts.verify_strategy_backfill_inpu
     validate_preparation_symbol_coverage,
     validate_strategy_input_coverage,
     validate_target_date_unavailable_exclusion,
+    validate_target_intraday_unavailable_exclusion,
 )
 from engines.trend_identifier.trend_identifier.runners.equity_trend_history_runner import (
     CoherentHistoricalWindow,
@@ -63,6 +65,7 @@ from engines.trend_identifier.trend_identifier.runners.equity_trend_history_runn
     NoTradingActivityEvidence,
     TargetDateHistoryUnavailableCandidate,
     TargetDateHistoryUnavailableEvidence,
+    TargetIntradayHistoryUnavailableCandidate,
     TargetSessionNotFinalized,
     bars_content_hash,
 )
@@ -1592,6 +1595,120 @@ class HistoricalBackfillContractTests(unittest.TestCase):
                 requested_symbols_count=2,
                 prepared_symbols_count=1,
             )
+
+
+class TargetIntradayUnavailableTests(unittest.TestCase):
+    def fixture(self, symbol="NIFTYFPI"):
+        _, equity = HistoricalBackfillContractTests()._coherent_history_result(
+            symbol, [100.0, 101.0, 102.0, 103.0, 104.0]
+        )
+        raw, metadata = equity.build_raw_bars_for_symbol_asof.return_value
+        raw["hourly"] = raw["hourly"].iloc[:-1].copy()
+        metadata.update(resolved_exchange="NFO", resolved_tradingsymbol=symbol + "26MAYFUT", kite_instrument_type="FUT")
+        runner = EquityTrendHistoryRunner.__new__(EquityTrendHistoryRunner)
+        runner.equity_runner = equity
+        equity.evaluate_raw_bars_asof.reset_mock()
+        return runner, raw, equity
+
+    def candidate(self):
+        runner, raw, equity = self.fixture()
+        before = raw["hourly"].copy()
+        with self.assertRaises(TargetIntradayHistoryUnavailableCandidate) as caught:
+            runner.build_history_for_symbol("NIFTYFPI", history_days=5, end_date=date(2026, 5, 22), retrieved_at=datetime(2026, 5, 23, tzinfo=timezone.utc), final_close_resolver=MagicMock())
+        equity.evaluate_raw_bars_asof.assert_not_called()
+        pd.testing.assert_frame_equal(before, raw["hourly"])
+        self.assertEqual(caught.exception.evidence.hourly_content_hash, bars_content_hash(before))
+        return caught.exception
+
+    def test_daily_present_hourly_absent_is_audited_without_synthetic_trend(self):
+        exclusion = build_strict_preparation_manifest(
+            ["ABC", "NIFTYFPI"], {"ABC"}, [self.candidate()], end_date=date(2026, 5, 22)
+        )["exclusions"][0]
+        self.assertEqual(exclusion["reason"], "TARGET_INTRADAY_HISTORY_UNAVAILABLE")
+        self.assertEqual(exclusion["evidence"]["target_daily_candle_count"], 1)
+        validate_target_intraday_unavailable_exclusion(exclusion, date(2026, 5, 22))
+
+    def test_unrelated_symbol_remains_pending(self):
+        runner, _, _ = self.fixture("OTHER")
+        with self.assertRaises(TargetSessionNotFinalized):
+            runner.build_history_for_symbol("OTHER", history_days=5, end_date=date(2026, 5, 22), retrieved_at=datetime(2026, 5, 23, tzinfo=timezone.utc), final_close_resolver=MagicMock())
+
+    def test_partial_target_intraday_is_not_silently_excluded(self):
+        runner, raw, _ = self.fixture()
+        partial = raw["hourly"].iloc[-1:].copy()
+        partial["timestamp"] = pd.to_datetime(["2026-05-22T09:15:00+05:30"], utc=True)
+        raw["hourly"] = pd.concat([raw["hourly"], partial], ignore_index=True)
+        with self.assertRaises(TargetSessionNotFinalized):
+            runner.build_history_for_symbol("NIFTYFPI", history_days=5, end_date=date(2026, 5, 22), retrieved_at=datetime(2026, 5, 23, tzinfo=timezone.utc), final_close_resolver=MagicMock())
+
+    def test_same_day_gap_and_no_prepared_peer_remain_rejected(self):
+        runner, _, _ = self.fixture()
+        with self.assertRaises(TargetSessionNotFinalized):
+            runner.build_history_for_symbol("NIFTYFPI", history_days=5, end_date=date(2026, 5, 22), retrieved_at=datetime(2026, 5, 22, 12, tzinfo=timezone.utc), final_close_resolver=MagicMock())
+        with self.assertRaisesRegex(RuntimeError, "No prepared peer"):
+            build_strict_preparation_manifest(["NIFTYFPI"], set(), [self.candidate()], end_date=date(2026, 5, 22))
+
+    def test_tampered_or_broadened_exclusion_is_rejected(self):
+        exclusion = build_strict_preparation_manifest(["ABC", "NIFTYFPI"], {"ABC"}, [self.candidate()], end_date=date(2026, 5, 22))["exclusions"][0]
+        for section, key, value in [
+            (None, "symbol", "OTHER"),
+            ("evidence", "target_intraday_candle_count", 1),
+            ("evidence", "target_daily_candle_count", 0),
+            ("evidence", "daily_volume", 0),
+            ("evidence", "daily_close", "NaN"),
+            ("evidence", "daily_content_hash", "unverified"),
+            ("evidence", "latest_daily_timestamp", "2026-05-21T00:00:00+05:30"),
+            ("evidence", "latest_intraday_timestamp", "2026-05-22T09:15:00+05:30"),
+            ("evidence", "daily_series", "UNVERIFIED"),
+            ("selected_instrument", "exchange", "NSE"),
+        ]:
+            invalid = deepcopy(exclusion)
+            (invalid[section] if section else invalid)[key] = value
+            with self.subTest(key=key), self.assertRaises(RuntimeError):
+                validate_target_intraday_unavailable_exclusion(invalid, date(2026, 5, 22))
+
+
+class HistoricalContractSourceTests(unittest.TestCase):
+    def test_historical_snapshot_never_uses_post_expiry_live_master(self):
+        kite = MagicMock()
+        kite.instruments.side_effect = AssertionError("live master must not select a historical expiry")
+        catalog = MagicMock()
+        catalog.session_date = date(2026, 10, 22)
+        catalog.monthly_futures_expiries.return_value = [date(2026, 10, 27), date(2026, 11, 24)]
+        info = TrendIdentifierKiteAdapter(kite).get_contract_info_for_symbol(
+            "ICICILIFE", datetime(2026, 10, 22, 10, tzinfo=timezone.utc), official_catalog=catalog
+        )
+        self.assertEqual(info.near_expiry, date(2026, 10, 27))
+        self.assertEqual(info.dte_near_month, 3)
+        kite.instruments.assert_not_called()
+        catalog.session_date = date(2026, 10, 23)
+        with self.assertRaisesRegex(Exception, "archive date"):
+            TrendIdentifierKiteAdapter(kite).get_contract_info_for_symbol("ICICILIFE", datetime(2026, 10, 22, 10, tzinfo=timezone.utc), official_catalog=catalog)
+
+    def test_exact_date_contract_cli_threads_official_archive_without_writing(self):
+        from services.nse_final_close import NseFinalCloseUnavailable
+        with patch.object(contract_sync, "get_kite_credentials", return_value=("key", "token")), patch.object(contract_sync, "KiteConnect"), patch.object(contract_sync, "TrendIdentifierKiteAdapter") as adapter, patch.object(contract_sync, "NseFinalCloseProvider") as provider, patch.object(contract_sync, "get_engine") as engine:
+            info = SimpleNamespace(near_expiry=date(2026, 10, 27), next_expiry=date(2026, 11, 24), dte_near_month=3, next_month_available=True, dte_next_month=23)
+            adapter.return_value.get_contract_info_for_symbol.return_value = info
+            with patch.object(sys, "argv", ["sync", "XJ1877", "--selection-date", "2026-10-22", "--symbols", "ICICILIFE", "--strict", "--dry-run"]), redirect_stdout(io.StringIO()):
+                contract_sync.main()
+            provider.return_value.fetch.assert_called_once_with(date(2026, 10, 22))
+            self.assertIs(adapter.return_value.get_contract_info_for_symbol.call_args.kwargs["official_catalog"], provider.return_value.fetch.return_value)
+            engine.assert_not_called()
+            provider.return_value.fetch.side_effect = NseFinalCloseUnavailable("missing archive")
+            with patch.object(sys, "argv", ["sync", "XJ1877", "--selection-date", "2026-10-22", "--symbols", "ICICILIFE", "--strict", "--dry-run"]), redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as raised:
+                contract_sync.main()
+            self.assertEqual(raised.exception.code, 75)
+            engine.assert_not_called()
+
+    def test_niftyfpi_readiness_defers_exclusion_proof_to_coherent_acquisition(self):
+        runner = EquityTrendHistoryRunner.__new__(EquityTrendHistoryRunner)
+        runner.equity_runner = MagicMock()
+        runner.equity_runner.resolve_instrument_asof.return_value = InstrumentMatch(1, "NFO", "NIFTYFPI26NOVFUT", "NIFTYFPI", "NFO-FUT", "FUT")
+        runner.equity_runner.fetch_historical_data.side_effect = [pd.DataFrame({"timestamp": pd.to_datetime(["2026-10-22T00:00:00+05:30"]), "close": [1461.05], "volume": [1100]}), pd.DataFrame()]
+        official = MagicMock()
+        self.assertIsNone(runner.check_target_session_finality("NIFTYFPI", date(2026, 10, 22), official))
+        official.assert_not_called()
 
 
 if __name__ == "__main__":

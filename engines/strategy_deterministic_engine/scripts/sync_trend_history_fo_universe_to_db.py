@@ -22,6 +22,7 @@ from engines.trend_identifier.trend_identifier.runners.equity_trend_history_runn
     EquityTrendHistoryRunner,
     NoTradingActivityCandidate,
     TargetDateHistoryUnavailableCandidate,
+    TargetIntradayHistoryUnavailableCandidate,
     TargetSessionNotFinalized,
     canonical_bars,
 )
@@ -90,7 +91,7 @@ def target_date_unavailable_exclusion(
     candidate: TargetDateHistoryUnavailableCandidate,
 ) -> dict:
     evidence = candidate.evidence
-    return {
+    result = {
         "symbol": evidence.symbol,
         "reason": candidate.reason,
         "stage": "TREND_PREPARATION",
@@ -109,6 +110,16 @@ def target_date_unavailable_exclusion(
             "market_session_confirmation": "PREPARED_PEER_TARGET_SESSION",
         },
     }
+
+    if isinstance(candidate, TargetIntradayHistoryUnavailableCandidate):
+        result["evidence"].update({
+            "daily_close": json_value(evidence.daily_close),
+            "daily_volume": json_value(evidence.daily_volume),
+            "daily_content_hash": evidence.daily_content_hash,
+            "hourly_content_hash": evidence.hourly_content_hash,
+            "daily_series": evidence.daily_series,
+        })
+    return result
 
 
 def preparation_exclusion(candidate) -> dict:
@@ -154,13 +165,17 @@ def build_strict_preparation_manifest(
             evidence.daily_volume != 0 or evidence.intraday_candle_count != 0
         ):
             raise RuntimeError("No-trading evidence did not satisfy the strict contract.")
-        if isinstance(candidate, TargetDateHistoryUnavailableCandidate) and (
+        if isinstance(candidate, TargetDateHistoryUnavailableCandidate) and not isinstance(candidate, TargetIntradayHistoryUnavailableCandidate) and (
             evidence.target_daily_candle_count != 0
             or evidence.target_intraday_candle_count != 0
         ):
             raise RuntimeError(
                 "Target-date-unavailable evidence did not satisfy the strict contract."
             )
+    for candidate in candidates:
+        if isinstance(candidate, TargetIntradayHistoryUnavailableCandidate):
+            from engines.strategy_deterministic_engine.scripts.verify_strategy_backfill_inputs import validate_target_intraday_unavailable_exclusion
+            validate_target_intraday_unavailable_exclusion(preparation_exclusion(candidate), end_date)
     exclusions = [
         preparation_exclusion(candidate)
         for candidate in sorted(candidates, key=lambda item: item.evidence.symbol)
@@ -787,12 +802,15 @@ def main() -> None:
                     sorted(
                         item.evidence.symbol
                         for item in exclusion_candidates
-                        if isinstance(item, TargetDateHistoryUnavailableCandidate)
+                        if isinstance(item, TargetDateHistoryUnavailableCandidate) and not isinstance(item, TargetIntradayHistoryUnavailableCandidate)
                     )
                 )
                 or "NONE"
             )
         )
+        print("TARGET_INTRADAY_HISTORY_UNAVAILABLE_SYMBOLS=" + (
+            ",".join(sorted(item.evidence.symbol for item in exclusion_candidates if isinstance(item, TargetIntradayHistoryUnavailableCandidate))) or "NONE"
+        ))
         print("FAILURES count=0")
     else:
         print(f"UPSERTED trend_history_fo_universe rows={total_rows}")

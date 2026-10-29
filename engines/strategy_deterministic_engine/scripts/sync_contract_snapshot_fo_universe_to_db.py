@@ -9,6 +9,7 @@ from kiteconnect import KiteConnect
 from kiteconnect.exceptions import TokenException
 
 from services.kite_credentials_service import get_kite_credentials
+from services.nse_final_close import NseFinalCloseProvider, NseFinalCloseUnavailable
 from engines.strategy_deterministic_engine.adapters.trend_identifier_adapter import TrendIdentifierKiteAdapter
 from engines.strategy_deterministic_engine.db.postgres import get_engine
 from engines.strategy_deterministic_engine.db.upserts import upsert_contract_snapshot_rows
@@ -62,6 +63,15 @@ def main() -> None:
         else adapter.get_fo_universe_symbols()
     )
 
+    official_catalog = None
+    if selection_date is not None:
+        try:
+            official_catalog = NseFinalCloseProvider().fetch(selection_date)
+        except NseFinalCloseUnavailable:
+            print("CONTRACT_SOURCE=PENDING reason=official_archive_unavailable")
+            raise SystemExit(75) from None
+        print(f"CONTRACT_SOURCE=NSE_FINAL_ARCHIVE selection_date={selection_date} source_name={official_catalog.source_name} source_hash={official_catalog.source_sha256}")
+
     rows: list[dict] = []
     failures: list[dict] = []
 
@@ -73,6 +83,7 @@ def main() -> None:
             contract_info = adapter.get_contract_info_for_symbol(
                 symbol,
                 asof_time,
+                official_catalog=official_catalog,
             )
 
             rows.append(
